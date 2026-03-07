@@ -783,6 +783,19 @@ def generate_IOCMNG_bob(beamline_path, output_path, prefix=None, config_path=Non
     elif isinstance(iocs_data, list):
         iocs = iocs_data
 
+    # Merge iocDefaults into each IOC entry
+    ioc_defaults = beamline_config.get("iocDefaults") or {}
+    if ioc_defaults:
+        merged_iocs = []
+        for ioc in iocs:
+            if isinstance(ioc, dict):
+                tmpl = ioc.get("template") or ioc.get("devtype") or ""
+                tmpl_defaults = ioc_defaults.get(tmpl)
+                merged_iocs.append({**tmpl_defaults, **ioc} if tmpl_defaults else ioc)
+            else:
+                merged_iocs.append(ioc)
+        iocs = merged_iocs
+
     # Filter out disabled IOCs
     iocs = [ioc for ioc in iocs if not ioc.get("disable", False)]
 

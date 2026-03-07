@@ -320,6 +320,19 @@ class IocmngTask(TaskBase):
             self.logger.warning("Unsupported 'iocs' format in beamline configuration")
             return
 
+        # Apply iocDefaults: merge template defaults into each IOC's data
+        ioc_defaults = self.beamline_config.get("iocDefaults") or {}
+        if ioc_defaults and items:
+            merged_items = []
+            for ioc_name, ioc_data in items:
+                if isinstance(ioc_data, dict):
+                    tmpl = ioc_data.get("template") or ioc_data.get("devtype") or ""
+                    tmpl_defaults = ioc_defaults.get(tmpl)
+                    if tmpl_defaults:
+                        ioc_data = {**tmpl_defaults, **ioc_data}
+                merged_items.append((ioc_name, ioc_data))
+            items = merged_items
+
         # Group IOCs by devgroup and initialize status
         for ioc_name, ioc_data in items:
             if isinstance(ioc_data, dict):

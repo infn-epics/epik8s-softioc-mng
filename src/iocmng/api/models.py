@@ -59,6 +59,14 @@ class JobRunResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
 
 
+class RestartResponse(BaseModel):
+    """Response for a plugin restart operation."""
+
+    ok: bool
+    message: str
+    validation: Optional[Dict[str, Any]] = None
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 

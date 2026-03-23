@@ -25,6 +25,9 @@ class PluginInfo:
         plugin_type: str,
         class_name: str,
         path: str = "",
+        branch: str = "main",
+        pat: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
         status: str = "loaded",
     ):
         self.name = name
@@ -32,6 +35,9 @@ class PluginInfo:
         self.plugin_type = plugin_type  # "task" or "job"
         self.class_name = class_name
         self.path = path
+        self.branch = branch
+        self.pat = pat  # stored for restart; never exposed in to_dict()
+        self.parameters = parameters or {}
         self.status = status
         self.instance: Optional[Any] = None
 
@@ -42,6 +48,7 @@ class PluginInfo:
             "plugin_type": self.plugin_type,
             "class_name": self.class_name,
             "path": self.path,
+            "branch": self.branch,
             "status": self.status,
         }
         if self.instance and isinstance(self.instance, TaskBase):
@@ -167,6 +174,9 @@ class IocMngController:
             plugin_type=load_result.plugin_type,
             class_name=load_result.class_name,
             path=path,
+            branch=branch,
+            pat=pat,
+            parameters=parameters or {},
             status="loaded",
         )
         info.instance = instance
@@ -268,3 +278,157 @@ class IocMngController:
                     info.status = "stopped"
                 except Exception as e:
                     logger.error(f"Error stopping '{info.name}': {e}")
+
+    # ------------------------------------------------------------------
+    # Hot-reload
+    # ------------------------------------------------------------------
+
+    def restart_plugin(self, name: str) -> Tuple[bool, str, Optional[Dict]]:
+        """Re-fetch, validate, and hot-reload a plugin without downtime.
+
+        Clones the repository into a temporary directory, validates it, and
+        only replaces the running instance if every check passes.  The PAT
+        and branch used during the original :meth:`add_plugin` call are
+        reused automatically.
+
+        Args:
+            name: Plugin name to restart.
+
+        Returns:
+            Tuple of (success, message, validation_dict_or_None).
+        """
+        with self._lock:
+            info = self._plugins.get(name)
+        if info is None:
+            return False, f"Plugin '{name}' not found", None
+
+        temp_name = f"__reload__{name}"
+        # Clean any leftover temp from a previous failed restart
+        if self.loader.plugin_path(temp_name).exists():
+            self.loader.remove(temp_name)
+
+        # 1. Clone to temp
+        ok, msg = self.loader.clone(temp_name, info.git_url, pat=info.pat, branch=info.branch)
+        if not ok:
+            return False, f"Re-clone failed: {msg}", None
+
+        # 2. Install requirements in temp
+        ok, msg = self.loader.install_requirements(temp_name, path=info.path)
+        if not ok:
+            self.loader.remove(temp_name)
+            return False, f"Dependency installation failed: {msg}", None
+
+        # 3. Load config from temp, merge with original parameters
+        plugin_config = self.loader.load_plugin_config(temp_name, path=info.path)
+        cfg_params = plugin_config.get("parameters", {})
+        merged_params = _deep_merge(cfg_params, info.parameters)
+        pv_defs = plugin_config.get("pvs", {})
+
+        # 4. Validate temp
+        validation = self.loader.validate(temp_name, path=info.path)
+        if not validation.ok:
+            self.loader.remove(temp_name)
+            return False, "Validation failed", validation.to_dict()
+
+        # 5. Load class from temp (verify it is importable)
+        cls, load_result = self.loader.load_class(temp_name, path=info.path)
+        if cls is None:
+            self.loader.remove(temp_name)
+            return False, "Failed to load class", load_result.to_dict()
+
+        # --- All checks passed: apply the update ---
+
+        # 6. Stop current instance
+        was_running = False
+        if info.instance and isinstance(info.instance, TaskBase):
+            was_running = info.instance.running
+            try:
+                info.instance.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping '{name}' during restart: {e}")
+
+        # 7. Swap directories and remove from registry
+        with self._lock:
+            self._plugins.pop(name, None)
+        self.loader.remove(name)
+        self.loader.swap_plugin(temp_name, name)
+
+        # 8. Re-instantiate
+        try:
+            instance = cls(
+                name=name,
+                parameters=merged_params,
+                pv_definitions=pv_defs,
+                beamline_config=self.beamline_config,
+                ophyd_devices=self.ophyd_devices,
+                prefix=self.config.get("prefix"),
+            )
+        except Exception as e:
+            return False, f"Instantiation failed after swap: {e}", validation.to_dict()
+
+        new_info = PluginInfo(
+            name=name,
+            git_url=info.git_url,
+            plugin_type=load_result.plugin_type,
+            class_name=load_result.class_name,
+            path=info.path,
+            branch=info.branch,
+            pat=info.pat,
+            parameters=info.parameters,
+            status="loaded",
+        )
+        new_info.instance = instance
+
+        with self._lock:
+            self._plugins[name] = new_info
+
+        # 9. Restart if it was a running task
+        if load_result.plugin_type == "task" and was_running:
+            try:
+                instance.initialize()
+                instance.start()
+                new_info.status = "running"
+            except Exception as e:
+                new_info.status = "error"
+                return False, f"Restart failed: {e}", validation.to_dict()
+
+        return True, f"Plugin '{name}' restarted successfully", validation.to_dict()
+
+    # ------------------------------------------------------------------
+    # Bulk initial load
+    # ------------------------------------------------------------------
+
+    def add_plugins_from_config(self, plugins: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Load a list of plugins defined in the initial plugins config.
+
+        Each entry may contain:
+            name, git_url, path, branch, pat, auto_start, parameters.
+
+        Args:
+            plugins: List of plugin config dicts.
+
+        Returns:
+            List of result dicts with ``name``, ``ok``, and ``message``.
+        """
+        results = []
+        for p in plugins:
+            name = p.get("name")
+            git_url = p.get("git_url")
+            if not name or not git_url:
+                results.append({"name": name, "ok": False, "message": "Missing name or git_url"})
+                continue
+            ok, msg, _ = self.add_plugin(
+                name=name,
+                git_url=git_url,
+                pat=p.get("pat"),
+                branch=p.get("branch", "main"),
+                path=p.get("path", ""),
+                auto_start=p.get("auto_start", True),
+                parameters=p.get("parameters"),
+            )
+            if ok:
+                logger.info(f"Initial plugin '{name}' loaded")
+            else:
+                logger.error(f"Initial plugin '{name}' failed: {msg}")
+            results.append({"name": name, "ok": ok, "message": msg})
+        return results

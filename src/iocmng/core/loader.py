@@ -235,3 +235,19 @@ class PluginLoader:
 
         shutil.rmtree(dest)
         return True, f"Plugin '{name}' removed"
+
+    def swap_plugin(self, from_name: str, to_name: str) -> None:
+        """Atomically replace *to_name* directory with *from_name* (used for hot-reload).
+
+        The *from_name* directory is renamed to *to_name*, removing any existing
+        *to_name* directory first.
+
+        Args:
+            from_name: Temp plugin name (source directory).
+            to_name: Real plugin name (destination directory).
+        """
+        src = self.plugin_path(from_name)
+        dst = self.plugin_path(to_name)
+        if dst.exists():
+            shutil.rmtree(dst)
+        src.rename(dst)

@@ -122,9 +122,9 @@ class MyDiagnostics(JobBase):
 
 ### REST API Usage
 
-#### Add a task
+#### Add a plugin (task or job — type auto-detected)
 ```bash
-curl -X POST http://localhost:8080/api/v1/tasks \
+curl -X POST http://localhost:8080/api/v1/plugins \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-monitor",
@@ -136,37 +136,45 @@ curl -X POST http://localhost:8080/api/v1/tasks \
   }'
 ```
 
-The `path` field specifies the sub-directory inside the repo where the Python file and `config.yaml` live. Parameters passed in the REST request override values from `config.yaml`.
+The plugin type (task / job) is determined automatically from the class found in the repo. The `/tasks` and `/jobs` endpoints are still available as type-checked aliases.
 
-#### Remove a task
+#### Hot-reload a plugin (restart)
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/tasks/my-monitor
+curl -X POST http://localhost:8080/api/v1/plugins/my-monitor/restart
 ```
 
-#### Add a job
-```bash
-curl -X POST http://localhost:8080/api/v1/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-diag",
-    "git_url": "https://github.com/user/my-diagnostics-job.git",
-    "path": "jobs/diagnostics"
-  }'
-```
+Re-clones the repository into a temporary directory, validates the new code, and only updates the running instance if all checks pass. The original branch and PAT are reused. If validation fails the running plugin is left untouched.
 
 #### Run a job
 ```bash
+curl -X POST http://localhost:8080/api/v1/plugins/my-monitor/run
+```
+
+#### Remove a plugin
+```bash
+curl -X DELETE http://localhost:8080/api/v1/plugins/my-monitor
+```
+
+#### List all plugins
+```bash
+curl http://localhost:8080/api/v1/plugins
+
+# Filter by type
+curl "http://localhost:8080/api/v1/plugins?type=task"
+curl "http://localhost:8080/api/v1/plugins?type=job"
+```
+
+#### Type-scoped aliases
+```bash
+# Tasks
+curl -X POST   http://localhost:8080/api/v1/tasks
+curl -X DELETE http://localhost:8080/api/v1/tasks/my-monitor
+curl           http://localhost:8080/api/v1/tasks
+
+# Jobs
+curl -X POST http://localhost:8080/api/v1/jobs
 curl -X POST http://localhost:8080/api/v1/jobs/my-diag/run
-```
-
-#### Remove a job
-```bash
 curl -X DELETE http://localhost:8080/api/v1/jobs/my-diag
-```
-
-#### List all tasks
-```bash
-curl http://localhost:8080/api/v1/tasks
 ```
 
 #### Health check
@@ -270,12 +278,41 @@ Additional PVs are created from the `pvs` section of `config.yaml`.
 
 ## Configuration
 
+### Initial Plugins (`IOCMNG_PLUGINS_CONFIG`)
+
+Set `IOCMNG_PLUGINS_CONFIG` to a YAML file path to pre-load plugins on startup:
+
+```yaml
+# plugins.yaml
+plugins:
+  - name: beam-monitor
+    git_url: https://github.com/org/beamline-tasks.git
+    path: tasks/monitor          # sub-directory inside the repo
+    branch: main
+    pat: ghp_xxx                 # optional — for private repos
+    parameters:
+      threshold: 80.0            # override config.yaml defaults
+
+  - name: daily-report
+    git_url: https://github.com/org/beamline-jobs.git
+    path: jobs/report
+    auto_start: false            # jobs default to false; tasks default to true
+```
+
+```bash
+export IOCMNG_PLUGINS_CONFIG=/etc/iocmng/plugins.yaml
+iocmng-server
+```
+
+All paths in the file are loaded sequentially at startup. Any that fail are logged as errors but do not prevent the server from starting.
+
 ### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `IOCMNG_CONFIG` | (none) | Path to config.yaml |
 | `IOCMNG_BEAMLINE_CONFIG` | (none) | Path to values.yaml |
+| `IOCMNG_PLUGINS_CONFIG` | (none) | Path to initial plugins YAML |
 | `IOCMNG_PLUGINS_DIR` | `/data/plugins` | Directory for cloned plugins |
 | `IOCMNG_HOST` | `0.0.0.0` | Server bind address |
 | `IOCMNG_PORT` | `8080` | Server port |

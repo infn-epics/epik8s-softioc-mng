@@ -1,0 +1,34 @@
+# config.yaml — Plugin configuration for ExampleMonitor task
+#
+# Place this file alongside your task Python file in the git repository.
+# The IOC Manager loads it automatically when the plugin is added.
+
+# Parameters passed to the task constructor (override via REST API)
+parameters:
+  mode: continuous        # "continuous" or "triggered"
+  interval: 1.0           # seconds between cycles (used by your execute logic)
+  threshold: 75.0         # example application parameter
+
+# PV definitions — created automatically by the IOC Manager
+pvs:
+  inputs:
+    SETPOINT:
+      type: float
+      value: 50.0
+      unit: "%"
+      prec: 2
+      low: 0
+      high: 100
+  outputs:
+    OUTPUT_RESULT:
+      type: float
+      value: 0.0
+      unit: "arb"
+      prec: 3
+      low: 0
+      high: 100
+    ALARM:
+      type: bool
+      value: 0
+      znam: "OK"
+      onam: "ALARM"

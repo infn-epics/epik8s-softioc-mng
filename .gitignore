@@ -32,3 +32,6 @@ Thumbs.db
 # Project specific
 values.yaml.local
 config.yaml.local
+
+# Plugins (cloned at runtime)
+/plugins/

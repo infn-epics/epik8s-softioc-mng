@@ -1,0 +1,19 @@
+# config.yaml — Plugin configuration for ExampleDiagnostics job
+#
+# Place this file alongside your job Python file in the git repository.
+# The IOC Manager loads it automatically when the plugin is added.
+
+# Parameters passed to the job constructor (override via REST API)
+parameters:
+  collect_network: false   # whether to include network info
+  timeout: 30              # seconds before the job times out
+
+# PV definitions — created automatically by the IOC Manager
+pvs:
+  outputs:
+    PYTHON_VERSION:
+      type: string
+      value: ""
+    SYSTEM_NAME:
+      type: string
+      value: ""

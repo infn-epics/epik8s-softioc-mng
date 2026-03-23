@@ -1,22 +1,26 @@
-# Beamline Controller Requirements
-# Python dependencies for the beamline controller application
+# IOC Manager Framework - Runtime Requirements
+# Install with: pip install -e ".[all]" for full functionality
 
-# EPICS soft IOC support (pythonSoftIOC)
-softioc
+# Core (always required)
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+pyyaml>=6.0
+pydantic>=2.0
 
-# Cothread for cooperative threading
-cothread
+# Optional: EPICS soft IOC support
+# softioc
+# cothread
 
-# YAML parsing
-pyyaml
+# Optional: Ophyd device abstraction
+# ophyd
+# infn_ophyd_hal
 
-# Ophyd for device abstraction
-ophyd
+# Optional: Kubernetes integration
+# kubernetes
 
-# INFN Ophyd HAL (if available locally, otherwise install from source)
-infn_ophyd_hal
-
-# Logging and utilities
-python-dateutil
-
-kubernetes
+# Development
+pytest>=7.0
+pytest-asyncio
+httpx
+black
+flake8

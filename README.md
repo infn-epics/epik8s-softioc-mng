@@ -1,372 +1,338 @@
-# Beamline Controller
+# iocmng — IOC Manager Framework
 
-A modular Python application for managing beamline control tasks with EPICS soft IOC integration. Each task runs in a dedicated thread and exposes PVs (Process Variables) for monitoring and control.
+A pluggable task/job framework for IOC Manager applications. Provides base classes for continuous **tasks** and one-shot **jobs** that can be dynamically loaded at runtime via a REST API.
 
 ## Features
 
-- **Modular Task Architecture**: Each task is a separate Python module with defined inputs/outputs
-- **EPICS Soft IOC Integration**: Every task creates its own soft IOC with PVs using the `softioc` library (pythonSoftIOC)
-- **Ophyd Device Integration**: Automatically creates Ophyd device instances for all IOCs/devices defined in values.yaml
-- **Device Abstraction**: Tasks can access motors, BPMs, and other devices through high-level Ophyd interfaces
-- **Cothread-Based Execution**: Tasks run using cooperative threading via cothread
-- **Enable/Disable Control**: Each task has a built-in ENABLE PV for runtime control
-- **YAML Configuration**: Simple configuration via YAML files
-- **Beamline Integration**: Access to full beamline configuration from values.yaml
+- **`TaskBase`** — base class for continuous tasks (run in a loop)
+- **`JobBase`** — base class for one-shot jobs (run once, return result)
+- **REST API** — add/remove tasks and jobs at runtime from git repositories
+- **Validation** — plugins are validated (must derive from base class, must compile, abstract methods must be implemented)
+- **EPICS soft IOC PVs** — every task and job gets default PVs (STATUS, MESSAGE, etc.) via `softioc`
+- **Per-plugin `config.yaml`** — each plugin defines its PVs and parameters in a config file inside its git repo
+- **Path support** — specify a sub-directory inside the git repo where the plugin sources live
+- **Plugin `requirements.txt`** — plugins can ship their own dependencies
+- **Optional Ophyd integration** — device abstraction via `ophyd`/`infn_ophyd_hal` (optional dependency)
+- **Docker image** — ready-to-run container with the REST API
+- **PyPI package** — `pip install iocmng`
 
-## Installation
+## Quick Start
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd epik8s-beamline-controller
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Ensure EPICS base is installed** (required for softioc):
-   - Set `EPICS_BASE` environment variable
-   - Set `EPICS_HOST_ARCH` environment variable
-   - Add EPICS binaries to PATH
-
-## Usage
-
-### Basic Usage
-
-Run the controller with default configuration files:
+### Install from PyPI
 
 ```bash
-python main.py
+pip install iocmng
+
+# With all optional dependencies (ophyd, kubernetes)
+pip install iocmng[all]
 ```
 
-### Custom Configuration
-
-Specify custom configuration files:
+### Run the API Server
 
 ```bash
-python main.py --config my_config.yaml --values my_values.yaml --log-level DEBUG
+# Using the CLI entry point
+iocmng-server
+
+# Or with environment variables
+IOCMNG_PORT=8080 IOCMNG_LOG_LEVEL=debug iocmng-server
+
+# Or with Docker
+docker run -p 8080:8080 ghcr.io/infn-epics/epik8s-beamline-controller:latest
 ```
 
-### Command Line Options
+### Create a Task
 
-- `--config`: Path to config.yaml (default: `config.yaml`)
-- `--values`: Path to values.yaml (default: `values.yaml`)
-- `--log-level`: Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
+Create a git repository with:
+1. A Python file with a class deriving from `TaskBase`
+2. A `config.yaml` defining PVs and parameters
+
+```
+my-monitor-repo/
+├── my_monitor.py
+├── config.yaml
+└── requirements.txt    # optional — extra dependencies
+```
+
+**my_monitor.py**
+```python
+from iocmng import TaskBase
+
+class MyMonitor(TaskBase):
+    def initialize(self):
+        self.logger.info("Starting monitor")
+
+    def execute(self):
+        value = self.read_sensor()
+        self.set_pv("READING", value)
+        if value > self.parameters.get("threshold", 75):
+            self.set_pv("ALARM", 1)
+
+    def cleanup(self):
+        self.logger.info("Stopping monitor")
+
+    def read_sensor(self):
+        return 42.0
+```
+
+**config.yaml**
+```yaml
+parameters:
+  mode: continuous
+  interval: 1.0
+  threshold: 75.0
+
+pvs:
+  inputs:
+    SETPOINT:
+      type: float
+      value: 50.0
+      unit: "%"
+      prec: 2
+      low: 0
+      high: 100
+  outputs:
+    READING:
+      type: float
+      value: 0.0
+      unit: "arb"
+      prec: 3
+    ALARM:
+      type: bool
+      value: 0
+      znam: "OK"
+      onam: "ALARM"
+```
+
+### Create a Job
+
+```python
+# my_diagnostics.py
+from iocmng import JobBase
+from iocmng.base.job import JobResult
+
+class MyDiagnostics(JobBase):
+    def initialize(self):
+        self.logger.info("Preparing diagnostics")
+
+    def execute(self) -> JobResult:
+        info = {"status": "healthy", "uptime": 12345}
+        self.set_pv("SYSTEM_NAME", info["status"])
+        return JobResult(success=True, data=info, message="Diagnostics OK")
+```
+
+### REST API Usage
+
+#### Add a task
+```bash
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-monitor",
+    "git_url": "https://github.com/user/my-monitor-task.git",
+    "pat": "ghp_optional_token",
+    "branch": "main",
+    "path": "src/monitor",
+    "parameters": {"threshold": 80.0}
+  }'
+```
+
+The `path` field specifies the sub-directory inside the repo where the Python file and `config.yaml` live. Parameters passed in the REST request override values from `config.yaml`.
+
+#### Remove a task
+```bash
+curl -X DELETE http://localhost:8080/api/v1/tasks/my-monitor
+```
+
+#### Add a job
+```bash
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-diag",
+    "git_url": "https://github.com/user/my-diagnostics-job.git",
+    "path": "jobs/diagnostics"
+  }'
+```
+
+#### Run a job
+```bash
+curl -X POST http://localhost:8080/api/v1/jobs/my-diag/run
+```
+
+#### Remove a job
+```bash
+curl -X DELETE http://localhost:8080/api/v1/jobs/my-diag
+```
+
+#### List all tasks
+```bash
+curl http://localhost:8080/api/v1/tasks
+```
+
+#### Health check
+```bash
+curl http://localhost:8080/api/v1/health
+```
+
+## Plugin Structure
+
+Each plugin lives in a git repository (or a sub-directory of one). The expected layout:
+
+```
+<repo-root>/
+└── <path>/                 # optional sub-directory (specified via REST "path" field)
+    ├── my_plugin.py        # Python module with TaskBase/JobBase subclass
+    ├── config.yaml         # Plugin configuration (PVs, parameters)
+    └── requirements.txt    # Optional additional pip dependencies
+```
+
+### config.yaml Format
+
+```yaml
+# Parameters — passed to the plugin constructor as self.parameters
+# REST-supplied parameters override these defaults
+parameters:
+  mode: continuous          # "continuous" or "triggered"
+  interval: 1.0             # application-specific
+  threshold: 75.0           # application-specific
+
+# PV definitions — created automatically by the IOC Manager
+pvs:
+  inputs:                   # writable PVs (operator → plugin)
+    SETPOINT:
+      type: float           # float, int, string, bool
+      value: 50.0           # initial value
+      unit: "%"             # EGU (float only)
+      prec: 2               # precision (float only)
+      low: 0                # LOPR (float only)
+      high: 100             # HOPR (float only)
+  outputs:                  # read-only PVs (plugin → operator)
+    READING:
+      type: float
+      value: 0.0
+    ALARM:
+      type: bool
+      value: 0
+      znam: "OK"            # zero-state name (bool only)
+      onam: "ALARM"         # one-state name (bool only)
+```
+
+## Plugin Validation
+
+When a task or job is added, the framework performs the following checks:
+
+1. **Clone** — the git repository is cloned (with optional PAT for private repos)
+2. **Dependencies** — `requirements.txt` is installed if present (from `path` or repo root)
+3. **Config** — `config.yaml` is loaded from `path` to read PV definitions and default parameters
+4. **Syntax** — Python files are parsed via AST for syntax errors
+5. **Import** — the module is imported to check for runtime import errors
+6. **Inheritance** — at least one class must derive from `TaskBase` or `JobBase`
+7. **Abstract methods** — all abstract methods (`initialize`, `execute`, `cleanup`) must be implemented
+
+If any check fails, the plugin is rejected and the error details are returned.
+
+## Default PVs
+
+Every task automatically gets these PVs (prefix: `BEAMLINE:NAMESPACE:TASKNAME`):
+
+| PV | Type | Description |
+|---|---|---|
+| `ENABLE` | boolOut | Enable/disable the task |
+| `STATUS` | mbbIn | INIT / RUN / PAUSED / END / ERROR |
+| `MESSAGE` | stringIn | Human-readable status message |
+| `CYCLE_COUNT` | longIn | Cycle counter (continuous mode) |
+| `RUN` | boolOut | Trigger execution (triggered mode) |
+
+Every job gets:
+
+| PV | Type | Description |
+|---|---|---|
+| `STATUS` | mbbIn | IDLE / RUNNING / SUCCESS / FAILED |
+| `MESSAGE` | stringIn | Human-readable status message |
+
+Additional PVs are created from the `pvs` section of `config.yaml`.
+
+## Choosing Between Continuous Task, Triggered Task, and Job
+
+| | **Continuous Task** | **Triggered Task** | **Job** |
+|---|---|---|---|
+| **Execution** | `execute()` loops indefinitely | `execute()` called when `RUN` PV is written | `execute()` called via REST |
+| **How triggered** | Automatic (runs on start) | Operator writes `1` to the `RUN` EPICS PV | `POST /api/v1/jobs/{name}/run` |
+| **Return value** | None (side effects only) | None (side effects only) | `JobResult` with `success`, `data`, `message` |
+| **Has `cleanup()`** | Yes | Yes | No |
+| **EPICS PV** | `CYCLE_COUNT` | `RUN` (boolOut) | — |
+| **Typical use** | Polling, monitoring, periodic updates | Operator-driven actions from CS-Studio/Phoebus | API-driven actions from scripts or services |
+
+**Rule of thumb:**
+- Use a **continuous task** for anything that needs to run on a regular cycle (e.g., reading a sensor every second).
+- Use a **triggered task** when the action is initiated from the EPICS control system (e.g., an operator clicks a button in Phoebus that writes to a PV).
+- Use a **job** when the action is initiated from software/REST (e.g., a Kubernetes CronJob, a CI script, or another microservice).
 
 ## Configuration
 
-### config.yaml
+### Environment Variables
 
-Defines the tasks to run and their configurations:
+| Variable | Default | Description |
+|---|---|---|
+| `IOCMNG_CONFIG` | (none) | Path to config.yaml |
+| `IOCMNG_BEAMLINE_CONFIG` | (none) | Path to values.yaml |
+| `IOCMNG_PLUGINS_DIR` | `/data/plugins` | Directory for cloned plugins |
+| `IOCMNG_HOST` | `0.0.0.0` | Server bind address |
+| `IOCMNG_PORT` | `8080` | Server port |
+| `IOCMNG_DISABLE_OPHYD` | `true` | Skip ophyd initialization |
+| `IOCMNG_LOG_LEVEL` | `info` | Logging level |
 
-```yaml
-tasks:
-  - name: "monitor_01"
-    module: "monitoring_task"  # Python module in tasks/ directory
-    parameters:
-      update_rate: 2.0  # Task-specific parameters
-      calculation_type: "average"
-    pvs:
-      inputs:
-        INPUT1:
-          type: float
-          value: 0.0
-          unit: "V"
-          prec: 3
-      outputs:
-        OUTPUT_RESULT:
-          type: float
-          value: 0.0
-          unit: "V"
-          prec: 3
+### Optional: Ophyd Device Integration
+
+When `ophyd` and `infn_ophyd_hal` are installed and `IOCMNG_DISABLE_OPHYD=false`, the controller automatically creates Ophyd device instances from your `values.yaml` IOC configuration. Tasks can access devices via `self.get_device()` and `self.list_devices()`.
+
+## Project Structure
+
+```
+src/iocmng/
+├── __init__.py           # Package entry: exports TaskBase, JobBase
+├── base/
+│   ├── task.py           # TaskBase — continuous tasks with PV support
+│   └── job.py            # JobBase — one-shot jobs with PV support
+├── core/
+│   ├── controller.py     # Central plugin manager
+│   ├── loader.py         # Git clone + config loading + module loading
+│   └── validator.py      # Plugin validation
+├── api/
+│   ├── app.py            # FastAPI application factory
+│   ├── models.py         # Pydantic request/response models
+│   └── routes.py         # REST API endpoints
+└── ophyd/
+    └── factory.py        # Optional ophyd device creation
 ```
 
-### values.yaml
-
-Contains the beamline configuration (can reference your existing SPARC configuration).
-
-**Important**: The controller reads the `epicsConfiguration.iocs` section and creates Ophyd device instances for each IOC based on:
-- `devgroup`: Device group (e.g., 'mag', 'diag', 'vac', 'ps')
-- `devtype`: Device type (e.g., 'tml', 'bpm', 'dante')
-- Device naming follows the pattern: `{beamline}:{namespace}:{iocprefix}:{device_name}`
-
-## Ophyd Device Integration
-
-The controller automatically creates Ophyd device instances from your values.yaml IOC configuration. Each task receives a dictionary of these devices.
-
-### Accessing Ophyd Devices in Tasks
-
-```python
-def initialize(self):
-    # Get a specific device
-    motor = self.get_device('tml-ch1')
-    if motor:
-        position = motor.position
-        motor.move(10.0, wait=False)
-    
-    # List all available devices
-    devices = self.list_devices()
-    self.logger.info(f"Available devices: {devices}")
-    
-    # Get devices by type (if implemented)
-    motors = self.get_devices_by_type('mag')
-```
-
-### Supported Device Types
-
-The factory supports these device types from `infn_ophyd_hal`:
-
-- **Motors** (`devgroup='mag'`):
-  - `devtype='tml'`: TML motors (OphydTmlMotor)
-  
-- **BPMs** (`devgroup='diag'`):
-  - `devtype='bpm'`, `'libera-spe'`, `'libera-sppp'`: Beam Position Monitors (SppOphydBpm)
-  
-- **Power Supplies** (`devgroup='ps'`):
-  - `devtype='sim'`: Simulated power supply (OphydPSSim)
-  - `devtype='dante'`: Dante magnet power supply (OphydPSDante)
-  - `devtype='generic'`: Generic power supply (OphydPS)
-
-### Device Naming Convention
-
-Devices are named based on the IOC configuration:
-- Single device IOCs: Named by IOC name (e.g., `"tml-ch1"`)
-- Multi-device IOCs: Named as `"{ioc_name}_{device_name}"` (e.g., `"llrfs01_device1"`)
-
-### Adding Custom Device Types
-
-You can register custom Ophyd device types:
-
-```python
-from ophyd_device_factory import OphydDeviceFactory
-
-factory = OphydDeviceFactory()
-factory.register_device_type('custom_group', 'custom_type', MyOphydClass)
-```
-
-## Creating Custom Tasks
-
-### 1. Create a Task Module
-
-Create a new Python file in the `tasks/` directory (e.g., `my_custom_task.py`):
-
-```python
-from task_base import TaskBase
-from typing import Any
-
-class MyCustomTask(TaskBase):
-    """My custom task implementation."""
-    
-    def initialize(self):
-        """Initialize the task."""
-        # Get parameters from config
-        self.my_param = self.parameters.get('my_param', 'default')
-        
-        # Access beamline config
-        beamline = self.beamline_config.get('beamline', 'unknown')
-        
-        self.logger.info(f"Task initialized with param: {self.my_param}")
-    
-    def run(self):
-        """Main execution loop."""
-        import cothread
-        while self.running:
-            # Check if enabled
-            if self.get_pv('ENABLE'):
-                # Read input PVs
-                input_val = self.get_pv('MY_INPUT') or 0.0
-                
-                # Do processing
-                result = input_val * 2.0
-                
-                # Write output PVs
-                self.set_pv('MY_OUTPUT', result)
-            
-            cothread.Sleep(1.0)
-    
-    def cleanup(self):
-        """Cleanup when stopping."""
-        self.logger.info("Task stopped")
-    
-    def handle_pv_write(self, pv_name: str, value: Any):
-        """Handle PV writes."""
-        if pv_name == 'MY_INPUT':
-            self.logger.debug(f"Input changed to {value}")
-```
-
-### 2. Add Task to config.yaml
-
-```yaml
-tasks:
-  - name: "custom_task_01"
-    module: "my_custom_task"  # Module name (without .py)
-    parameters:
-      my_param: "custom_value"
-    pvs:
-      inputs:
-        MY_INPUT:
-          type: float
-          value: 0.0
-      outputs:
-        MY_OUTPUT:
-          type: float
-          value: 0.0
-```
-
-### 3. Run the Controller
+## Development
 
 ```bash
-python main.py
+# Install in editable mode with dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/ -v
+
+# Format
+black .
+
+# Lint
+flake8 .
 ```
 
-## PV Naming Convention
+## GitHub Actions
 
-PVs are automatically prefixed based on the beamline configuration:
+The workflow in `.github/workflows/release.yml` triggers on:
+- **Git tags** matching `v*` (e.g., `v2.0.0`)
+- **Manual dispatch** (workflow_dispatch)
 
-```
-{BEAMLINE}:{NAMESPACE}:{TASK_NAME}:{PV_NAME}
-```
-
-For example, with SPARC beamline:
-- `SPARC:SPARC:MONITOR_01:INPUT1`
-- `SPARC:SPARC:MONITOR_01:OUTPUT_RESULT`
-- `SPARC:SPARC:MONITOR_01:ENABLE`
-
-## Built-in PVs
-
-Every task automatically has these standard PVs:
-
-- **ENABLE**: Boolean (0/1) - Enable/disable task execution
-- **STATUS**: Multistate (INIT/RUN/PAUSED/END/ERROR) - Current task state
-- **MESSAGE**: String - Status messages and error descriptions
-- **CYCLE_COUNT**: Integer - Execution cycle counter (continuous tasks only)
-- **RUN**: Boolean button - Trigger execution (triggered tasks only)
-
-**Note**: These PV names are reserved and should not be defined in your task's `pvs.inputs` or `pvs.outputs` configuration.
-
-## Generating OPI/BOB Display
-
-The project includes a script to automatically generate CS-Studio BOY/Phoebus display files from your configuration:
-
-```bash
-# Generate OPI from default config
-python generate_opi.py
-
-# Specify custom config and output
-python generate_opi.py --config my_config.yaml --values my_values.yaml --output my_display.bob
-```
-
-The generated display includes:
-- Enable buttons for each task
-- Status indicators showing current state
-- Cycle counters (for continuous tasks)
-- Trigger buttons (for triggered tasks)
-- Message displays showing task status/errors
-
-After running the script, open `test.bob` in Phoebus or CS-Studio to monitor and control your tasks.
-
-## PV Types
-
-Supported PV types in configuration:
-
-- `float`: Floating point value (creates `aIn`/`aOut` records)
-- `int`: Integer value (creates `longIn`/`longOut` records)
-- `string`: String value (creates `stringIn`/`stringOut` records)
-- `bool`: Boolean type (creates `boolIn`/`boolOut` records)
-
-Optional PV fields:
-
-- `value`: Initial value
-- `unit`: Engineering unit (EGU field)
-- `prec`: Precision (for float)
-- `znam`/`onam`: Zero/One names (for bool)
-- `low`/`high`: Display limits (LOPR/HOPR fields)
-
-## Example Tasks
-
-### Monitoring Task
-
-Reads multiple inputs, performs calculations, and updates outputs:
-
-```bash
-# Access PVs
-caget SPARC:SPARC:MONITOR_01:INPUT1
-caput SPARC:SPARC:MONITOR_01:INPUT1 5.5
-caget SPARC:SPARC:MONITOR_01:OUTPUT_RESULT
-```
-
-### Data Logging Task
-
-Logs data to files at regular intervals:
-
-```bash
-# Check log status
-caget SPARC:SPARC:LOGGER_01:LOG_COUNT
-caget SPARC:SPARC:LOGGER_01:LAST_LOG_TIME
-
-# Disable logging
-caput SPARC:SPARC:LOGGER_01:ENABLE 0
-```
-
-## Architecture
-
-```
-main.py
-├── Loads config.yaml and values.yaml
-├── Creates BeamlineController
-└── For each task:
-    ├── Loads task module dynamically
-    ├── Creates task instance with parameters and PV definitions
-    ├── Task creates PVs using softioc builder
-    ├── Task initializes IOC (builder.LoadDatabase, softioc.iocInit)
-    └── Task runs in cothread
-        ├── Runs task.initialize()
-        └── Runs task.run() loop using cothread.Sleep()
-```
-
-## Task Lifecycle
-
-1. **Initialization**: `initialize()` called once at startup
-2. **Execution**: `run()` called in cothread (use `cothread.Sleep()` for delays)
-3. **PV Updates**: `handle_pv_write()` called when input PVs are written
-4. **Cleanup**: `cleanup()` called when stopping
-
-## Development Tips
-
-1. **Logging**: Use `self.logger` for consistent logging
-2. **Thread Safety**: cothread handles cooperative threading automatically
-3. **PV Access**: Always use `self.get_pv()` and `self.set_pv()` methods
-4. **Enable Check**: Check `self.get_pv('ENABLE')` in your run loop and `self.running` flag
-5. **Parameters**: Access task parameters via `self.parameters`
-6. **Beamline Config**: Access beamline data via `self.beamline_config`
-7. **Sleep**: Use `cothread.Sleep()` instead of `time.sleep()`
-8. **External PVs**: Use `epics.caget()` and `epics.caput()` to interact with other IOCs
-
-## Troubleshooting
-
-### PVs Not Visible
-
-- Check EPICS environment variables (`EPICS_CA_ADDR_LIST`, etc.)
-- Verify PV prefix in logs
-- Use `cainfo` or `pvget` to test connectivity
-
-### Task Not Starting
-
-- Check logs for errors during initialization
-- Verify task module name matches file name
-- Ensure all required parameters are provided
-
-### Import Errors
-
-- Verify all dependencies are installed: `pip install -r requirements.txt`
-- Check Python path includes project root
+It will:
+1. Run tests
+2. Build and publish the Python package to PyPI
+3. Build and push a Docker image to GitHub Container Registry (ghcr.io)
 
 ## License
 
-[Add your license information here]
-
-## Contributors
-
-Main controller of the beamline activities
+MIT

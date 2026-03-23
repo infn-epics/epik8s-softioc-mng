@@ -1,0 +1,94 @@
+"""FastAPI application factory for the IOC Manager REST service."""
+
+import logging
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Optional
+
+import yaml
+from fastapi import FastAPI
+
+from iocmng.api.routes import router, set_controller
+from iocmng.core.controller import IocMngController
+
+
+def _load_yaml(path: str):
+    try:
+        with open(path, "r") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+
+
+def create_app(
+    config_path: Optional[str] = None,
+    beamline_path: Optional[str] = None,
+    plugins_dir: Optional[str] = None,
+    disable_ophyd: bool = True,
+) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    Args:
+        config_path: Path to config.yaml (optional).
+        beamline_path: Path to values.yaml beamline configuration (optional).
+        plugins_dir: Directory for cloned plugins.
+        disable_ophyd: Skip ophyd initialization (default True for API mode).
+
+    Returns:
+        Configured FastAPI instance.
+    """
+    config = _load_yaml(config_path) if config_path else {}
+    beamline_config = _load_yaml(beamline_path) if beamline_path else {}
+
+    p_dir = Path(plugins_dir) if plugins_dir else None
+    controller = IocMngController(
+        config=config,
+        beamline_config=beamline_config,
+        plugins_dir=p_dir,
+        disable_ophyd=disable_ophyd,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        logging.info("IOC Manager starting up")
+        yield
+        logging.info("IOC Manager shutting down")
+        controller.stop_all()
+
+    app = FastAPI(
+        title="IOC Manager",
+        description="REST API for dynamically loading and managing IOC tasks and jobs",
+        version="2.0.0",
+        lifespan=lifespan,
+    )
+    set_controller(controller)
+    app.include_router(router)
+
+    return app
+
+
+def run_server():
+    """Entry point to run the API server."""
+    import uvicorn
+
+    config_path = os.environ.get("IOCMNG_CONFIG", None)
+    beamline_path = os.environ.get("IOCMNG_BEAMLINE_CONFIG", None)
+    plugins_dir = os.environ.get("IOCMNG_PLUGINS_DIR", "/data/plugins")
+    host = os.environ.get("IOCMNG_HOST", "0.0.0.0")
+    port = int(os.environ.get("IOCMNG_PORT", "8080"))
+    disable_ophyd = os.environ.get("IOCMNG_DISABLE_OPHYD", "true").lower() == "true"
+
+    log_level = os.environ.get("IOCMNG_LOG_LEVEL", "info").lower()
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    app = create_app(
+        config_path=config_path,
+        beamline_path=beamline_path,
+        plugins_dir=plugins_dir,
+        disable_ophyd=disable_ophyd,
+    )
+    uvicorn.run(app, host=host, port=port, log_level=log_level)

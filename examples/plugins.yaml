@@ -1,0 +1,35 @@
+# plugins.yaml — Initial plugins configuration
+#
+# Set IOCMNG_PLUGINS_CONFIG=/path/to/plugins.yaml before starting iocmng-server.
+# All entries are loaded sequentially at startup. Failures are logged but do not
+# prevent the server from starting.
+#
+# Each entry:
+#   name        required  Unique plugin name (alphanumeric, hyphens, underscores)
+#   git_url     required  HTTPS git repository URL
+#   path        optional  Sub-directory inside the repo where the plugin lives
+#   branch      optional  Branch or tag to clone (default: main)
+#   pat         optional  Personal Access Token for private repos
+#   auto_start  optional  Start the plugin immediately; tasks default true, jobs default false
+#   parameters  optional  Key/value overrides for config.yaml parameters
+
+plugins:
+  - name: beam-monitor
+    git_url: https://github.com/org/beamline-tasks.git
+    path: tasks/monitor
+    branch: main
+    # pat: ghp_your_token_here
+    parameters:
+      threshold: 80.0
+      interval: 1.0
+
+  - name: charge-monitor
+    git_url: https://github.com/org/beamline-tasks.git
+    path: tasks/charge
+    branch: main
+
+  - name: daily-report
+    git_url: https://github.com/org/beamline-jobs.git
+    path: jobs/report
+    branch: main
+    auto_start: false

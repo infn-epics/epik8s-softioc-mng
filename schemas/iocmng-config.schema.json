@@ -1,0 +1,175 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://epik8s.infn.it/schemas/iocmng-config.json",
+  "title": "IOC Manager Plugin Configuration",
+  "description": "Schema for config.yaml files used by iocmng tasks and jobs. Place this alongside the Python module in the plugin git repository.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "parameters": {
+      "type": "object",
+      "description": "Key-value pairs passed to the task/job constructor. REST API parameters override these at runtime.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["continuous", "triggered"],
+          "default": "continuous",
+          "description": "Task execution mode. 'continuous' runs execute() in a loop; 'triggered' waits for RUN PV."
+        },
+        "interval": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1.0,
+          "description": "Seconds between execute() cycles (continuous mode)."
+        }
+      },
+      "additionalProperties": {
+        "description": "Application-specific parameters. Values can be scalars (string, number, boolean) or arrays of scalars.",
+        "oneOf": [
+          { "type": "string" },
+          { "type": "number" },
+          { "type": "boolean" },
+          {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "boolean" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "pvs": {
+      "type": "object",
+      "description": "PV definitions created automatically by the soft IOC. Divided into inputs (writable) and outputs (read-only).",
+      "additionalProperties": false,
+      "properties": {
+        "inputs": {
+          "$ref": "#/$defs/pvGroup",
+          "description": "PVs that external clients can write to (aOut, stringOut, boolOut, longOut)."
+        },
+        "outputs": {
+          "$ref": "#/$defs/pvGroup",
+          "description": "PVs that the task/job writes to (aIn, stringIn, boolIn, longIn)."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "pvGroup": {
+      "type": "object",
+      "description": "Map of PV names to their definitions.",
+      "additionalProperties": {
+        "$ref": "#/$defs/pvDefinition"
+      }
+    },
+    "pvDefinition": {
+      "type": "object",
+      "description": "Individual PV definition.",
+      "required": ["type", "value"],
+      "oneOf": [
+        { "$ref": "#/$defs/pvFloat" },
+        { "$ref": "#/$defs/pvInt" },
+        { "$ref": "#/$defs/pvString" },
+        { "$ref": "#/$defs/pvBool" }
+      ]
+    },
+    "pvFloat": {
+      "type": "object",
+      "description": "Analog (float) PV — maps to softioc aOut (input) or aIn (output).",
+      "required": ["type", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "float" },
+        "value": { "type": "number", "description": "Initial value." },
+        "unit": { "type": "string", "description": "Engineering units (e.g. 'V', 'mA', '%')." },
+        "prec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15,
+          "description": "Display precision (decimal places)."
+        },
+        "low": { "type": "number", "description": "Lower operating range." },
+        "high": { "type": "number", "description": "Upper operating range." }
+      }
+    },
+    "pvInt": {
+      "type": "object",
+      "description": "Integer PV — maps to softioc longOut (input) or longIn (output).",
+      "required": ["type", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "int" },
+        "value": { "type": "integer", "description": "Initial value." },
+        "low": { "type": "integer", "description": "Lower operating range." },
+        "high": { "type": "integer", "description": "Upper operating range." }
+      }
+    },
+    "pvString": {
+      "type": "object",
+      "description": "String PV — maps to softioc stringOut (input) or stringIn (output).",
+      "required": ["type", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "string" },
+        "value": { "type": "string", "description": "Initial value." }
+      }
+    },
+    "pvBool": {
+      "type": "object",
+      "description": "Boolean PV — maps to softioc boolOut (input) or boolIn (output).",
+      "required": ["type", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "bool" },
+        "value": {
+          "type": "integer",
+          "enum": [0, 1],
+          "description": "Initial value (0 or 1)."
+        },
+        "znam": {
+          "type": "string",
+          "default": "Off",
+          "description": "Label for the zero (false) state."
+        },
+        "onam": {
+          "type": "string",
+          "default": "On",
+          "description": "Label for the one (true) state."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "parameters": {
+        "mode": "continuous",
+        "interval": 1.0,
+        "threshold": 75.0
+      },
+      "pvs": {
+        "inputs": {
+          "SETPOINT": {
+            "type": "float",
+            "value": 50.0,
+            "unit": "%",
+            "prec": 2,
+            "low": 0,
+            "high": 100
+          }
+        },
+        "outputs": {
+          "ALARM": {
+            "type": "bool",
+            "value": 0,
+            "znam": "OK",
+            "onam": "ALARM"
+          }
+        }
+      }
+    }
+  ]
+}

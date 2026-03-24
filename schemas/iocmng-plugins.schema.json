@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://epik8s.infn.it/schemas/iocmng-plugins.json",
+  "title": "IOC Manager Plugins Configuration",
+  "description": "Schema for plugins.yaml — defines which task/job plugins to load at startup. Set IOCMNG_PLUGINS_CONFIG env var to point to this file.",
+  "type": "object",
+  "required": ["plugins"],
+  "additionalProperties": false,
+  "properties": {
+    "plugins": {
+      "type": "array",
+      "description": "List of plugins to load sequentially at startup.",
+      "items": {
+        "$ref": "#/$defs/pluginEntry"
+      }
+    }
+  },
+  "$defs": {
+    "pluginEntry": {
+      "type": "object",
+      "required": ["name", "git_url"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Unique plugin name (alphanumeric, hyphens, underscores)."
+        },
+        "git_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "HTTPS git repository URL."
+        },
+        "path": {
+          "type": "string",
+          "default": "",
+          "description": "Sub-directory inside the repo where the plugin Python file and config.yaml live (e.g. 'src/my_task')."
+        },
+        "branch": {
+          "type": "string",
+          "default": "main",
+          "description": "Branch or tag to clone."
+        },
+        "pat": {
+          "type": "string",
+          "description": "Personal Access Token for private repos. Prefer environment variables over hardcoding."
+        },
+        "auto_start": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the plugin immediately after loading (tasks default true, jobs default false)."
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Key-value overrides for config.yaml parameters.",
+          "additionalProperties": true
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "plugins": [
+        {
+          "name": "beam-monitor",
+          "git_url": "https://github.com/org/beamline-tasks.git",
+          "path": "tasks/monitor",
+          "branch": "main",
+          "parameters": {
+            "threshold": 80.0,
+            "interval": 1.0
+          }
+        },
+        {
+          "name": "daily-report",
+          "git_url": "https://github.com/org/beamline-jobs.git",
+          "path": "jobs/report",
+          "auto_start": false
+        }
+      ]
+    }
+  ]
+}

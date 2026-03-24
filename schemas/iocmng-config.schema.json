@@ -6,6 +6,11 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "prefix": {
+      "type": "string",
+      "pattern": "^[A-Z0-9][A-Z0-9_:-]*$",
+      "description": "Optional task-level PV prefix segment. Combined with the beamline controller global prefix as {CONTROLLER_PREFIX}:{TASK_PREFIX}:{PV_NAME}. If omitted, the plugin name (uppercased) is used as the prefix segment."
+    },
     "parameters": {
       "type": "object",
       "description": "Key-value pairs passed to the task/job constructor. REST API parameters override these at runtime.",

@@ -59,6 +59,7 @@ class PluginLoader:
         git_url: str,
         pat: Optional[str] = None,
         branch: str = "main",
+        force: bool = False,
     ) -> Tuple[bool, str]:
         """Clone a git repository for a plugin.
 
@@ -67,6 +68,8 @@ class PluginLoader:
             git_url: Git repository URL.
             pat: Optional Personal Access Token for private repos.
             branch: Branch or tag to checkout.
+            force: If True, remove any existing directory before cloning
+                   (used to recover from a previous failed attempt).
 
         Returns:
             Tuple of (success, message).
@@ -74,7 +77,11 @@ class PluginLoader:
         dest = self.plugin_path(name)
 
         if dest.exists():
-            return False, f"Plugin '{name}' already exists. Remove it first."
+            if force:
+                logger.warning("Removing stale plugin directory '%s' before re-clone", dest)
+                shutil.rmtree(dest)
+            else:
+                return False, f"Plugin '{name}' already exists. Remove it first."
 
         # Construct authenticated URL if PAT provided
         clone_url = git_url

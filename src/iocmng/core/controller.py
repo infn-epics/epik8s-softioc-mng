@@ -134,8 +134,8 @@ class IocMngController:
             if name in self._plugins:
                 return False, f"Plugin '{name}' already exists", None
 
-        # 1. Clone
-        ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch)
+        # 1. Clone (force=True removes any stale directory from a previous failed attempt)
+        ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch, force=True)
         if not ok:
             return False, msg, None
 

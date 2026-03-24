@@ -124,15 +124,14 @@ class MyDiagnostics(JobBase):
 
 #### Add a plugin (task or job — type auto-detected)
 ```bash
-curl -X POST http://localhost:8080/api/v1/plugins \
+curl -X POST http://sparc-beamline-controller.k8sda.lnf.infn.it/api/v1/plugins \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-monitor",
-    "git_url": "https://github.com/user/my-monitor-task.git",
-    "pat": "ghp_optional_token",
+    "git_url": "https://baltig.infn.it/lnf-da-control/epik8-sparc.git",
+    "pat": "",
     "branch": "main",
-    "path": "src/monitor",
-    "parameters": {"threshold": 80.0}
+    "path": "config/iocs/beamline-controller/check_motor_movement/",
   }'
 ```
 
@@ -140,7 +139,7 @@ The plugin type (task / job) is determined automatically from the class found in
 
 #### Hot-reload a plugin (restart)
 ```bash
-curl -X POST http://localhost:8080/api/v1/plugins/my-monitor/restart
+curl -X POST http://sparc-beamline-controller.k8sda.lnf.infn.it/api/v1/plugins/my-monitor/restart
 ```
 
 Re-clones the repository into a temporary directory, validates the new code, and only updates the running instance if all checks pass. The original branch and PAT are reused. If validation fails the running plugin is left untouched.

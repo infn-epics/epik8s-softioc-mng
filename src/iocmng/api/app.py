@@ -57,7 +57,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        logging.info("IOC Manager starting up")
+        import iocmng
+        logging.info(f"IOC Manager v{iocmng.__version__} starting up")
         # Load initial plugins defined in IOCMNG_PLUGINS_CONFIG
         if initial_plugins:
             logging.info(f"Loading {len(initial_plugins)} initial plugin(s) from config")
@@ -73,7 +74,7 @@ def create_app(
     app = FastAPI(
         title="IOC Manager",
         description="REST API for dynamically loading and managing IOC tasks and jobs",
-        version="2.0.0",
+        version="2.0.3",
         lifespan=lifespan,
     )
     set_controller(controller)

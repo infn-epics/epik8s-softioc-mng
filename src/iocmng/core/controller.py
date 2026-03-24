@@ -15,7 +15,17 @@ from iocmng.core.validator import ValidationResult
 logger = logging.getLogger(__name__)
 
 
-class PluginInfo:
+def _deep_merge(base: Dict, override: Dict) -> Dict:
+    """Recursively merge *override* into *base*, returning a new dict."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
     """Metadata about a loaded plugin."""
 
     def __init__(

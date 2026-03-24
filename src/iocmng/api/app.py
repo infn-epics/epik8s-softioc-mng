@@ -74,7 +74,7 @@ def create_app(
     app = FastAPI(
         title="IOC Manager",
         description="REST API for dynamically loading and managing IOC tasks and jobs",
-        version="2.0.6",
+        version="2.0.7",
         lifespan=lifespan,
     )
     set_controller(controller)

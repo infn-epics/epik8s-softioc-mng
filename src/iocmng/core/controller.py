@@ -26,6 +26,7 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
     return result
 
 
+class PluginInfo:
     """Metadata about a loaded plugin."""
 
     def __init__(

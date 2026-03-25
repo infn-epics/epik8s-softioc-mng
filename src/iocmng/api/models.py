@@ -78,14 +78,19 @@ class HealthResponse(BaseModel):
     jobs_count: int
 
 
-class TaskStartupInfoResponse(BaseModel):
-    """Startup metadata for a loaded task."""
+class PluginStartupInfoResponse(BaseModel):
+    """Startup metadata for a loaded task or job."""
 
     name: str
     plugin_type: str
     auto_start: bool
     auto_start_on_boot: bool
     autostart_order: Optional[int] = None
+    pv_prefix: Optional[str] = None
+    mode: Optional[str] = None
     start_parameters: Dict[str, Any]
     pv_definitions: Dict[str, Any]
+    base_control_pvs: List[str]
+    additional_input_pvs: List[str]
+    additional_output_pvs: List[str]
     built_pvs: List[str]

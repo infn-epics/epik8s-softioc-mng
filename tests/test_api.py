@@ -381,7 +381,13 @@ class TestTasksAlias:
         assert d["auto_start"] is True
         assert d["auto_start_on_boot"] is True
         assert d["autostart_order"] == 5
+        assert d["pv_prefix"]
+        assert d["mode"] == "continuous"
         assert d["start_parameters"]["threshold"] == 77.0
+        assert "ENABLE" in d["base_control_pvs"]
+        assert "STATUS" in d["base_control_pvs"]
+        assert "VALUE" in d["additional_output_pvs"]
+        assert "VALUE" in d["built_pvs"]
         assert "outputs" in d["pv_definitions"]
 
     def test_get_task_startup_info_missing(self, client):
@@ -397,6 +403,11 @@ class TestTasksAlias:
         })
         r = client.get("/api/v1/tasks")
         assert r.json()["count"] == 1
+        plugin = r.json()["plugins"][0]
+        assert "start_parameters" in plugin
+        assert "pv_definitions" in plugin
+        assert "built_pvs" in plugin
+        assert "base_control_pvs" in plugin
 
     def test_add_job_via_tasks_rejected(self, client, job_repo):
         r = client.post("/api/v1/tasks", json={
@@ -500,4 +511,27 @@ class TestJobsAlias:
 
     def test_get_nonexistent_job(self, client):
         assert client.get("/api/v1/jobs/ghost").status_code == 404
+
+    def test_get_job_startup_info(self, client, job_repo):
+        r_add = client.post("/api/v1/jobs", json={
+            "name": "startup-job",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        assert r_add.status_code == 200
+        assert r_add.json()["ok"] is True
+
+        r = client.get("/api/v1/jobs/startup-job/startup")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["name"] == "startup-job"
+        assert d["plugin_type"] == "job"
+        assert d["mode"] is None
+        assert "STATUS" in d["base_control_pvs"]
+        assert "MESSAGE" in d["base_control_pvs"]
+
+    def test_get_job_startup_info_missing(self, client):
+        r = client.get("/api/v1/jobs/missing/startup")
+        assert r.status_code == 404
 

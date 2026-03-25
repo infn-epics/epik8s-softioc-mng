@@ -64,6 +64,31 @@ class PluginInfo:
         self.instance: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        mode = None
+        if self.plugin_type == "task":
+            if self.instance is not None and hasattr(self.instance, "mode"):
+                mode = getattr(self.instance, "mode")
+            else:
+                param_mode = (self.start_parameters or {}).get("mode")
+                mode = str(param_mode).lower() if isinstance(param_mode, str) else "continuous"
+
+        base_control_pvs = ["STATUS", "MESSAGE"]
+        if self.plugin_type == "task":
+            base_control_pvs = ["ENABLE", "STATUS", "MESSAGE"]
+            if mode == "triggered":
+                base_control_pvs.append("RUN")
+            else:
+                base_control_pvs.append("CYCLE_COUNT")
+
+        additional_input_pvs = list((self.pv_definitions or {}).get("inputs", {}).keys())
+        additional_output_pvs = list((self.pv_definitions or {}).get("outputs", {}).keys())
+
+        built_pvs: List[str] = []
+        if self.instance is not None and hasattr(self.instance, "pvs"):
+            built_pvs = list(getattr(self.instance, "pvs", {}).keys())
+        if not built_pvs:
+            built_pvs = list(dict.fromkeys(base_control_pvs + additional_input_pvs + additional_output_pvs))
+
         d = {
             "name": self.name,
             "git_url": self.git_url,
@@ -75,6 +100,15 @@ class PluginInfo:
             "auto_start": self.auto_start,
             "auto_start_on_boot": self.auto_start_on_boot,
             "autostart_order": self.autostart_order,
+            "pv_prefix": self.instance.pv_prefix if self.instance and hasattr(self.instance, "pv_prefix") else None,
+            "mode": mode,
+            "parameters": self.parameters,
+            "start_parameters": self.start_parameters,
+            "pv_definitions": self.pv_definitions,
+            "base_control_pvs": base_control_pvs,
+            "additional_input_pvs": additional_input_pvs,
+            "additional_output_pvs": additional_output_pvs,
+            "built_pvs": built_pvs,
         }
         if self.instance and isinstance(self.instance, TaskBase):
             d["running"] = self.instance.running
@@ -442,25 +476,41 @@ class IocMngController:
             info = self._plugins.get(name)
         return info.to_dict() if info else None
 
-    def get_task_startup_info(self, name: str) -> Optional[Dict[str, Any]]:
-        """Return startup metadata (parameters/PVs) for a loaded task."""
+    def get_plugin_startup_info(
+        self, name: str, expected_type: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return startup metadata (parameters/PVs) for a loaded plugin."""
         with self._lock:
             info = self._plugins.get(name)
-        if info is None or info.plugin_type != "task":
+        if info is None:
             return None
-        built_pvs = []
-        if info.instance is not None and hasattr(info.instance, "pvs"):
-            built_pvs = list(getattr(info.instance, "pvs", {}).keys())
+        if expected_type and info.plugin_type != expected_type:
+            return None
+
+        startup = info.to_dict()
         return {
-            "name": info.name,
-            "plugin_type": info.plugin_type,
-            "auto_start": info.auto_start,
-            "auto_start_on_boot": info.auto_start_on_boot,
-            "autostart_order": info.autostart_order,
-            "start_parameters": info.start_parameters,
-            "pv_definitions": info.pv_definitions,
-            "built_pvs": built_pvs,
+            "name": startup["name"],
+            "plugin_type": startup["plugin_type"],
+            "auto_start": startup["auto_start"],
+            "auto_start_on_boot": startup["auto_start_on_boot"],
+            "autostart_order": startup["autostart_order"],
+            "pv_prefix": startup.get("pv_prefix"),
+            "mode": startup.get("mode"),
+            "start_parameters": startup["start_parameters"],
+            "pv_definitions": startup["pv_definitions"],
+            "base_control_pvs": startup["base_control_pvs"],
+            "additional_input_pvs": startup["additional_input_pvs"],
+            "additional_output_pvs": startup["additional_output_pvs"],
+            "built_pvs": startup["built_pvs"],
         }
+
+    def get_task_startup_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return startup metadata (parameters/PVs) for a loaded task."""
+        return self.get_plugin_startup_info(name, expected_type="task")
+
+    def get_job_startup_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return startup metadata (parameters/PVs) for a loaded job."""
+        return self.get_plugin_startup_info(name, expected_type="job")
 
     def stop_all(self):
         """Stop all running tasks."""

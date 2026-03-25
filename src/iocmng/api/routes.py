@@ -9,11 +9,11 @@ from iocmng.api.models import (
     AddPluginRequest,
     HealthResponse,
     JobRunResponse,
+    PluginStartupInfoResponse,
     PluginInfoResponse,
     PluginListResponse,
     PluginResponse,
     RestartResponse,
-    TaskStartupInfoResponse,
 )
 from iocmng.core.controller import IocMngController
 
@@ -188,7 +188,7 @@ async def get_task(name: str):
     return info
 
 
-@router.get("/tasks/{name}/startup", response_model=TaskStartupInfoResponse)
+@router.get("/tasks/{name}/startup", response_model=PluginStartupInfoResponse)
 async def get_task_startup(name: str):
     """Get startup parameters and PV definitions for a loaded task."""
     ctrl = _get_controller()
@@ -267,6 +267,16 @@ async def get_job(name: str):
     if not info:
         raise HTTPException(status_code=404, detail=f"Job '{name}' not found")
     return info
+
+
+@router.get("/jobs/{name}/startup", response_model=PluginStartupInfoResponse)
+async def get_job_startup(name: str):
+    """Get startup parameters and PV definitions for a loaded job."""
+    ctrl = _get_controller()
+    startup = ctrl.get_job_startup_info(name)
+    if not startup:
+        raise HTTPException(status_code=404, detail=f"Job '{name}' not found")
+    return startup
 
 
 # ------------------------------------------------------------------

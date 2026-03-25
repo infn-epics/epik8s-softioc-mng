@@ -7,10 +7,13 @@ A pluggable task/job framework for IOC Manager applications. Provides base class
 - **`TaskBase`** — base class for continuous tasks (run in a loop)
 - **`JobBase`** — base class for one-shot jobs (run once, return result)
 - **REST API** — add/remove tasks and jobs at runtime from git repositories
+- **Task startup metadata API** — inspect effective startup parameters and PV definitions for each loaded task
 - **Validation** — plugins are validated (must derive from base class, must compile, abstract methods must be implemented)
 - **EPICS soft IOC PVs** — every task and job gets default PVs (STATUS, MESSAGE, etc.) via `softioc`
 - **Per-plugin `config.yaml`** — each plugin defines its PVs and parameters in a config file inside its git repo
 - **Path support** — specify a sub-directory inside the git repo where the plugin sources live
+- **Autostart persistence** — uploaded tasks can be persisted for automatic reload on IOC Manager startup
+- **Autostart ordering** — define deterministic startup order for autostart tasks
 - **Plugin `requirements.txt`** — plugins can ship their own dependencies
 - **Optional Ophyd integration** — device abstraction via `ophyd`/`infn_ophyd_hal` (optional dependency)
 - **Docker image** — ready-to-run container with the REST API
@@ -132,6 +135,10 @@ curl -X POST http://sparc-beamline-controller.k8sda.lnf.infn.it/api/v1/plugins \
     "pat": "",
     "branch": "main",
     "path": "config/iocs/beamline-controller/check_motor_movement/",
+    "auto_start": true,
+    "auto_start_on_boot": true,
+    "autostart_order": 10,
+    "parameters": {"threshold": 80.0}
   }'
 ```
 
@@ -169,11 +176,39 @@ curl "http://localhost:8080/api/v1/plugins?type=job"
 curl -X POST   http://localhost:8080/api/v1/tasks
 curl -X DELETE http://localhost:8080/api/v1/tasks/my-monitor
 curl           http://localhost:8080/api/v1/tasks
+curl           http://localhost:8080/api/v1/tasks/my-monitor/startup
 
 # Jobs
 curl -X POST http://localhost:8080/api/v1/jobs
 curl -X POST http://localhost:8080/api/v1/jobs/my-diag/run
 curl -X DELETE http://localhost:8080/api/v1/jobs/my-diag
+```
+
+#### Get startup metadata for a task
+```bash
+curl http://localhost:8080/api/v1/tasks/my-monitor/startup
+```
+
+Example response:
+```json
+{
+  "name": "my-monitor",
+  "plugin_type": "task",
+  "auto_start": true,
+  "auto_start_on_boot": true,
+  "autostart_order": 10,
+  "start_parameters": {
+    "mode": "continuous",
+    "interval": 1.0,
+    "threshold": 80.0
+  },
+  "pv_definitions": {
+    "outputs": {
+      "VALUE": {"type": "float", "value": 0.0}
+    }
+  },
+  "built_pvs": ["ENABLE", "STATUS", "MESSAGE", "CYCLE_COUNT", "VALUE"]
+}
 ```
 
 #### Health check
@@ -238,6 +273,22 @@ When a task or job is added, the framework performs the following checks:
 
 If any check fails, the plugin is rejected and the error details are returned.
 
+## Task Startup Logging (AS Info)
+
+When a task starts, IOC Manager emits an `INFO` log line with startup metadata:
+
+- task name
+- mode
+- PV prefix
+- effective start parameters
+- PV definitions
+
+Example log line:
+
+```text
+AS_INFO task=my-monitor mode=continuous pv_prefix=SPARC:CONTROL:MY-MONITOR parameters={'interval': 1.0, 'threshold': 80.0} pv_definitions={'outputs': {'VALUE': {'type': 'float', 'value': 0.0}}}
+```
+
 ## Default PVs
 
 Every task automatically gets these PVs (prefix: `BEAMLINE:NAMESPACE:TASKNAME`):
@@ -289,6 +340,9 @@ plugins:
     path: tasks/monitor          # sub-directory inside the repo
     branch: main
     pat: ghp_xxx                 # optional — for private repos
+    auto_start: true             # start immediately after load
+    auto_start_on_boot: true     # persist and reload on next IOCMNG start
+    autostart_order: 10          # lower starts first
     parameters:
       threshold: 80.0            # override config.yaml defaults
 
@@ -303,7 +357,13 @@ export IOCMNG_PLUGINS_CONFIG=/etc/iocmng/plugins.yaml
 iocmng-server
 ```
 
-All paths in the file are loaded sequentially at startup. Any that fail are logged as errors but do not prevent the server from starting.
+Startup behavior details:
+
+- Entries from `IOCMNG_PLUGINS_CONFIG` are loaded at startup.
+- Tasks added via REST with `auto_start_on_boot=true` are persisted under `IOCMNG_PLUGINS_DIR/autostart_plugins.yaml` and auto-loaded on next startup.
+- If both sources define the same plugin `name`, the config-file entry wins and duplicates are skipped.
+- Startup loading is ordered by `autostart_order` (ascending), then by plugin name.
+- Failures are logged but do not prevent server startup.
 
 ### Environment Variables
 

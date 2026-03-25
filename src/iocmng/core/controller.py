@@ -91,8 +91,93 @@ class IocMngController:
         # Loaded plugins: name -> PluginInfo
         self._plugins: Dict[str, PluginInfo] = {}
 
-        # Ophyd devices (loaded externally, optional)
+        # Ophyd devices
         self.ophyd_devices: Dict[str, object] = {}
+        if not disable_ophyd and beamline_config:
+            self._initialize_ophyd_devices()
+
+    # ------------------------------------------------------------------
+    # Ophyd device creation from beamline config
+    # ------------------------------------------------------------------
+
+    def _initialize_ophyd_devices(self):
+        """Populate *self.ophyd_devices* from the ``epicsConfiguration.iocs``
+        section of the beamline configuration (same logic as legacy main.py).
+        """
+        try:
+            from infn_ophyd_hal.device_factory import DeviceFactory
+        except ImportError:
+            logger.warning("infn_ophyd_hal not installed — skipping ophyd initialization")
+            return
+
+        factory = DeviceFactory()
+        epics_config = self.beamline_config.get("epicsConfiguration", {})
+        iocs = epics_config.get("iocs", [])
+        logger.info("Initializing Ophyd devices from beamline configuration "
+                    f"({len(iocs)} IOC definitions)")
+
+        for ioc_config in iocs:
+            ioc_name = ioc_config.get("name")
+            if not ioc_name:
+                continue
+
+            if ioc_config.get("disable", False):
+                logger.debug(f"Skipping disabled IOC: {ioc_name}")
+                continue
+
+            devgroup = ioc_config.get("devgroup")
+            devtype = ioc_config.get("devtype")
+            if not devgroup:
+                logger.debug(f"IOC {ioc_name} has no devgroup, skipping")
+                continue
+
+            ioc_prefix = ioc_config.get("iocprefix", "")
+            devices = ioc_config.get("devices", [])
+
+            try:
+                if devices:
+                    for device_config in devices:
+                        device_name = device_config.get("name")
+                        if not device_name:
+                            continue
+                        if "iocroot" in ioc_config:
+                            pv_prefix = f"{ioc_prefix}:{ioc_config['iocroot']}:{device_name}"
+                        else:
+                            pv_prefix = f"{ioc_prefix}:{device_name}"
+
+                        myconfig = ioc_config.copy()
+                        myconfig["iocname"] = ioc_name
+                        myconfig.update(device_config)
+
+                        ophyd_device = factory.create_device(
+                            devgroup=devgroup, devtype=devtype,
+                            prefix=pv_prefix, name=device_name,
+                            config=myconfig,
+                        )
+                        if ophyd_device:
+                            device_key = device_name
+                            if device_key in self.ophyd_devices:
+                                device_key = f"{ioc_name}_{device_name}"
+                                if device_key in self.ophyd_devices:
+                                    logger.error(f"Duplicate device key '{device_key}', skipping")
+                                    continue
+                            self.ophyd_devices[device_key] = ophyd_device
+                            logger.debug(f"Created Ophyd device: {device_key} "
+                                         f"({ioc_name}/{devgroup}/{devtype} prefix={pv_prefix})")
+                else:
+                    ophyd_device = factory.create_device(
+                        devgroup=devgroup, devtype=devtype,
+                        prefix=ioc_prefix, name=ioc_name,
+                        config=ioc_config,
+                    )
+                    if ophyd_device:
+                        self.ophyd_devices[ioc_name] = ophyd_device
+                        logger.debug(f"Created Ophyd device: {ioc_name} ({devgroup}/{devtype})")
+            except Exception as e:
+                logger.error(f"Failed to create Ophyd device for {ioc_name}: {e}",
+                             exc_info=True)
+
+        logger.info(f"Created {len(self.ophyd_devices)} Ophyd devices")
 
     # ------------------------------------------------------------------
     # Plugin management

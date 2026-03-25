@@ -74,7 +74,7 @@ def create_app(
     app = FastAPI(
         title="IOC Manager",
         description="REST API for dynamically loading and managing IOC tasks and jobs",
-        version="2.0.7",
+        version="2.0.9",
         lifespan=lifespan,
     )
     set_controller(controller)
@@ -96,9 +96,16 @@ def run_server():
     disable_ophyd = os.environ.get("IOCMNG_DISABLE_OPHYD", "false").lower() == "true"
 
     log_level = os.environ.get("IOCMNG_LOG_LEVEL", "info").lower()
+    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+
+    # Configure our own loggers *before* uvicorn starts.  We pass
+    # ``log_config=None`` so uvicorn does NOT overwrite the root logger
+    # with its own dictConfig.  This preserves DEBUG-level output for
+    # all ``iocmng.*`` loggers.
     logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
+        level=numeric_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,
     )
 
     app = create_app(
@@ -108,4 +115,4 @@ def run_server():
         plugins_config_path=plugins_config_path,
         disable_ophyd=disable_ophyd,
     )
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    uvicorn.run(app, host=host, port=port, log_level=log_level, log_config=None)

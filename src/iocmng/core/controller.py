@@ -103,26 +103,34 @@ class IocMngController:
     # Ophyd — lazy singleton device creation
     # ------------------------------------------------------------------
 
-    # Map IOC template names to (devgroup, devtype) when devgroup is missing.
-    _TEMPLATE_MAP: Dict[str, tuple] = {
-        "motor": ("mot", "tml"),
-    }
-
     def _build_device_index(self):
         """Pre-compute a lookup table ``device_name -> creation spec`` from
         the ``epicsConfiguration.iocs`` section of the beamline config.
 
+        Each IOC's effective config is obtained by deep-merging its
+        ``iocDefaults[template]`` (if present) with the IOC-specific
+        overrides so that fields like ``devgroup`` and ``devtype`` are
+        inherited automatically.
+
         No actual devices are created here; they are instantiated lazily by
         :meth:`get_device`.
         """
+        ioc_defaults = self.beamline_config.get("iocDefaults", {})
         epics_config = self.beamline_config.get("epicsConfiguration", {})
         iocs = epics_config.get("iocs", [])
-        logger.info(f"Building device index from {len(iocs)} IOC definitions")
+        logger.info(f"Building device index from {len(iocs)} IOC definitions "
+                     f"({len(ioc_defaults)} iocDefaults templates)")
 
-        for ioc_config in iocs:
-            ioc_name = ioc_config.get("name")
+        for raw_ioc_config in iocs:
+            ioc_name = raw_ioc_config.get("name")
             if not ioc_name:
                 continue
+
+            # Merge iocDefaults[template] as base, IOC config overrides
+            template = raw_ioc_config.get("template", "")
+            defaults = ioc_defaults.get(template, {})
+            ioc_config = _deep_merge(defaults, raw_ioc_config) if defaults else dict(raw_ioc_config)
+
             if ioc_config.get("disable", False):
                 logger.debug(f"Skipping disabled IOC: {ioc_name}")
                 continue
@@ -130,17 +138,9 @@ class IocMngController:
             devgroup = ioc_config.get("devgroup")
             devtype = ioc_config.get("devtype")
 
-            # Infer devgroup/devtype from template when missing
             if not devgroup:
-                template = ioc_config.get("template", "")
-                mapped = self._TEMPLATE_MAP.get(template)
-                if mapped:
-                    devgroup, devtype = mapped
-                    logger.debug(f"IOC {ioc_name}: inferred devgroup={devgroup}, "
-                                 f"devtype={devtype} from template={template}")
-                else:
-                    logger.debug(f"IOC {ioc_name} has no devgroup and no known template, skipping")
-                    continue
+                logger.debug(f"IOC {ioc_name} has no devgroup after iocDefaults merge, skipping")
+                continue
 
             ioc_prefix = ioc_config.get("iocprefix", "")
             devices = ioc_config.get("devices", [])

@@ -126,6 +126,79 @@ class TestDevices:
         assert d["available_count"] == 0
         assert d["created_count"] == 0
 
+    def test_ioc_defaults_merging(self, tmp_path):
+        """Devices inherit devgroup/devtype from iocDefaults[template]."""
+        beamline = {
+            "iocDefaults": {
+                "motor": {
+                    "devgroup": "mot",
+                    "devtype": "technosoft-asyn",
+                    "template": "motor",
+                    "opi": "tml/TML_Main.bob",
+                },
+                "hazemeyer": {
+                    "devgroup": "mag",
+                    "devtype": "haz-ser",
+                },
+            },
+            "epicsConfiguration": {
+                "iocs": [
+                    {
+                        "name": "tml-ch1",
+                        "template": "motor",
+                        "iocprefix": "SPARC:MOT:TML",
+                        "devices": [
+                            {"name": "GUNFLG01", "axid": 1},
+                            {"name": "AC1FLG01", "axid": 2},
+                        ],
+                    },
+                    {
+                        "name": "haz-ch1",
+                        "template": "hazemeyer",
+                        "iocprefix": "SPARC:MAG:HZ",
+                        "devices": [
+                            {"name": "SOL01", "id": "1"},
+                        ],
+                    },
+                    {
+                        "name": "vitara",
+                        "template": "motor",
+                        "devtype": "newport",
+                        "devgroup": "rf",
+                        "iocprefix": "SPARC:MOT",
+                        "iocroot": "VITARA01",
+                        "devices": [
+                            {"name": "m0", "axid": 0},
+                        ],
+                    },
+                ],
+            },
+        }
+        from iocmng.core.controller import IocMngController
+        ctrl = IocMngController(beamline_config=beamline, disable_ophyd=False,
+                                plugins_dir=tmp_path / "plugins")
+        idx = ctrl._device_index
+
+        # Motor IOC inherits devgroup=mot, devtype=technosoft-asyn from defaults
+        assert "GUNFLG01" in idx
+        assert idx["GUNFLG01"]["devgroup"] == "mot"
+        assert idx["GUNFLG01"]["devtype"] == "technosoft-asyn"
+        assert idx["AC1FLG01"]["devgroup"] == "mot"
+
+        # Hazemeyer IOC inherits from defaults
+        assert "SOL01" in idx
+        assert idx["SOL01"]["devgroup"] == "mag"
+        assert idx["SOL01"]["devtype"] == "haz-ser"
+
+        # Vitara overrides devtype/devgroup from IOC-specific config
+        assert "m0" in idx
+        assert idx["m0"]["devgroup"] == "rf"
+        assert idx["m0"]["devtype"] == "newport"
+        assert idx["m0"]["prefix"] == "SPARC:MOT:VITARA01:m0"
+
+        # Merged config for motor IOC should have opi from defaults
+        assert idx["GUNFLG01"]["config"].get("opi") == "tml/TML_Main.bob"
+
 
 # ---------------------------------------------------------------------------
 # Unified /api/v1/plugins

@@ -8,6 +8,7 @@ from typing import Optional
 
 import yaml
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from iocmng.api.routes import router, set_controller
 from iocmng.core.controller import IocMngController
@@ -87,6 +88,16 @@ def create_app(
         version="2.2.0",
         lifespan=lifespan,
     )
+    
+    # Configure CORS to allow requests from any origin
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all origins
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all HTTP methods
+        allow_headers=["*"],  # Allow all headers
+    )
+    
     set_controller(controller)
     app.include_router(router)
 

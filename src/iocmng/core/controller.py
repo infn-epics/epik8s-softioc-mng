@@ -91,93 +91,145 @@ class IocMngController:
         # Loaded plugins: name -> PluginInfo
         self._plugins: Dict[str, PluginInfo] = {}
 
-        # Ophyd devices
+        # Ophyd devices — lazy singleton dict.
+        # Devices are created on first access via get_device().
         self.ophyd_devices: Dict[str, object] = {}
+        self._device_index: Dict[str, Dict[str, Any]] = {}
+        self._device_factory = None
         if not disable_ophyd and beamline_config:
-            self._initialize_ophyd_devices()
+            self._build_device_index()
 
     # ------------------------------------------------------------------
-    # Ophyd device creation from beamline config
+    # Ophyd — lazy singleton device creation
     # ------------------------------------------------------------------
 
-    def _initialize_ophyd_devices(self):
-        """Populate *self.ophyd_devices* from the ``epicsConfiguration.iocs``
-        section of the beamline configuration (same logic as legacy main.py).
+    # Map IOC template names to (devgroup, devtype) when devgroup is missing.
+    _TEMPLATE_MAP: Dict[str, tuple] = {
+        "motor": ("mot", "tml"),
+    }
+
+    def _build_device_index(self):
+        """Pre-compute a lookup table ``device_name -> creation spec`` from
+        the ``epicsConfiguration.iocs`` section of the beamline config.
+
+        No actual devices are created here; they are instantiated lazily by
+        :meth:`get_device`.
         """
-        try:
-            from infn_ophyd_hal.device_factory import DeviceFactory
-        except ImportError:
-            logger.warning("infn_ophyd_hal not installed — skipping ophyd initialization")
-            return
-
-        factory = DeviceFactory()
         epics_config = self.beamline_config.get("epicsConfiguration", {})
         iocs = epics_config.get("iocs", [])
-        logger.info("Initializing Ophyd devices from beamline configuration "
-                    f"({len(iocs)} IOC definitions)")
+        logger.info(f"Building device index from {len(iocs)} IOC definitions")
 
         for ioc_config in iocs:
             ioc_name = ioc_config.get("name")
             if not ioc_name:
                 continue
-
             if ioc_config.get("disable", False):
                 logger.debug(f"Skipping disabled IOC: {ioc_name}")
                 continue
 
             devgroup = ioc_config.get("devgroup")
             devtype = ioc_config.get("devtype")
+
+            # Infer devgroup/devtype from template when missing
             if not devgroup:
-                logger.debug(f"IOC {ioc_name} has no devgroup, skipping")
-                continue
+                template = ioc_config.get("template", "")
+                mapped = self._TEMPLATE_MAP.get(template)
+                if mapped:
+                    devgroup, devtype = mapped
+                    logger.debug(f"IOC {ioc_name}: inferred devgroup={devgroup}, "
+                                 f"devtype={devtype} from template={template}")
+                else:
+                    logger.debug(f"IOC {ioc_name} has no devgroup and no known template, skipping")
+                    continue
 
             ioc_prefix = ioc_config.get("iocprefix", "")
             devices = ioc_config.get("devices", [])
 
+            if devices:
+                for device_config in devices:
+                    device_name = device_config.get("name")
+                    if not device_name:
+                        continue
+                    if "iocroot" in ioc_config:
+                        pv_prefix = f"{ioc_prefix}:{ioc_config['iocroot']}:{device_name}"
+                    else:
+                        pv_prefix = f"{ioc_prefix}:{device_name}"
+
+                    merged_config = ioc_config.copy()
+                    merged_config["iocname"] = ioc_name
+                    merged_config.update(device_config)
+
+                    key = device_name
+                    if key in self._device_index:
+                        key = f"{ioc_name}_{device_name}"
+                    self._device_index[key] = {
+                        "devgroup": devgroup,
+                        "devtype": devtype,
+                        "prefix": pv_prefix,
+                        "name": device_name,
+                        "config": merged_config,
+                    }
+            else:
+                self._device_index[ioc_name] = {
+                    "devgroup": devgroup,
+                    "devtype": devtype,
+                    "prefix": ioc_prefix,
+                    "name": ioc_name,
+                    "config": ioc_config,
+                }
+
+        logger.info(f"Device index built: {len(self._device_index)} devices available for lazy creation")
+
+    def _ensure_factory(self):
+        """Import and cache the DeviceFactory singleton."""
+        if self._device_factory is None:
             try:
-                if devices:
-                    for device_config in devices:
-                        device_name = device_config.get("name")
-                        if not device_name:
-                            continue
-                        if "iocroot" in ioc_config:
-                            pv_prefix = f"{ioc_prefix}:{ioc_config['iocroot']}:{device_name}"
-                        else:
-                            pv_prefix = f"{ioc_prefix}:{device_name}"
+                from infn_ophyd_hal.device_factory import DeviceFactory
+                self._device_factory = DeviceFactory()
+            except ImportError:
+                logger.warning("infn_ophyd_hal not installed — device creation unavailable")
+        return self._device_factory
 
-                        myconfig = ioc_config.copy()
-                        myconfig["iocname"] = ioc_name
-                        myconfig.update(device_config)
+    def get_device(self, device_name: str):
+        """Return an Ophyd device by name, creating it on first access (singleton).
 
-                        ophyd_device = factory.create_device(
-                            devgroup=devgroup, devtype=devtype,
-                            prefix=pv_prefix, name=device_name,
-                            config=myconfig,
-                        )
-                        if ophyd_device:
-                            device_key = device_name
-                            if device_key in self.ophyd_devices:
-                                device_key = f"{ioc_name}_{device_name}"
-                                if device_key in self.ophyd_devices:
-                                    logger.error(f"Duplicate device key '{device_key}', skipping")
-                                    continue
-                            self.ophyd_devices[device_key] = ophyd_device
-                            logger.debug(f"Created Ophyd device: {device_key} "
-                                         f"({ioc_name}/{devgroup}/{devtype} prefix={pv_prefix})")
-                else:
-                    ophyd_device = factory.create_device(
-                        devgroup=devgroup, devtype=devtype,
-                        prefix=ioc_prefix, name=ioc_name,
-                        config=ioc_config,
-                    )
-                    if ophyd_device:
-                        self.ophyd_devices[ioc_name] = ophyd_device
-                        logger.debug(f"Created Ophyd device: {ioc_name} ({devgroup}/{devtype})")
-            except Exception as e:
-                logger.error(f"Failed to create Ophyd device for {ioc_name}: {e}",
-                             exc_info=True)
+        The device is shared across all plugins.  If the device name is not
+        found in the beamline index, ``None`` is returned.
+        """
+        # Fast path — already created
+        if device_name in self.ophyd_devices:
+            return self.ophyd_devices[device_name]
 
-        logger.info(f"Created {len(self.ophyd_devices)} Ophyd devices")
+        spec = self._device_index.get(device_name)
+        if spec is None:
+            logger.debug(f"Device '{device_name}' not found in device index")
+            return None
+
+        factory = self._ensure_factory()
+        if factory is None:
+            return None
+
+        logger.info(f"Creating device on demand: {device_name} "
+                     f"({spec['devgroup']}/{spec['devtype']} prefix={spec['prefix']})")
+        try:
+            device = factory.create_device(
+                devgroup=spec["devgroup"],
+                devtype=spec["devtype"],
+                prefix=spec["prefix"],
+                name=spec["name"],
+                config=spec["config"],
+            )
+        except Exception as e:
+            logger.error(f"Failed to create device '{device_name}': {e}", exc_info=True)
+            return None
+
+        if device is not None:
+            self.ophyd_devices[device_name] = device
+        return device
+
+    def list_available_devices(self) -> List[str]:
+        """Return names of all devices known in the beamline config."""
+        return list(self._device_index.keys())
 
     # ------------------------------------------------------------------
     # Plugin management
@@ -259,6 +311,7 @@ class IocMngController:
                 beamline_config=self.beamline_config,
                 ophyd_devices=self.ophyd_devices,
                 prefix=self.config.get("prefix"),
+                device_resolver=self.get_device,
             )
         except Exception as e:
             self.loader.remove(name)
@@ -458,6 +511,7 @@ class IocMngController:
                 beamline_config=self.beamline_config,
                 ophyd_devices=self.ophyd_devices,
                 prefix=self.config.get("prefix"),
+                device_resolver=self.get_device,
             )
         except Exception as e:
             return False, f"Instantiation failed after swap: {e}", validation.to_dict()

@@ -271,3 +271,22 @@ async def health():
         tasks_count=len(tasks),
         jobs_count=len(jobs),
     )
+
+
+# ------------------------------------------------------------------
+# Devices
+# ------------------------------------------------------------------
+
+
+@router.get("/devices")
+async def list_devices():
+    """List all devices available in the beamline config (indexed, not yet created)."""
+    ctrl = _get_controller()
+    available = ctrl.list_available_devices()
+    created = list(ctrl.ophyd_devices.keys())
+    return {
+        "available": available,
+        "available_count": len(available),
+        "created": created,
+        "created_count": len(created),
+    }

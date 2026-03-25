@@ -115,6 +115,19 @@ class TestHealth:
 
 
 # ---------------------------------------------------------------------------
+# Devices
+# ---------------------------------------------------------------------------
+
+class TestDevices:
+    def test_devices_empty(self, client):
+        r = client.get("/api/v1/devices")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["available_count"] == 0
+        assert d["created_count"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Unified /api/v1/plugins
 # ---------------------------------------------------------------------------
 

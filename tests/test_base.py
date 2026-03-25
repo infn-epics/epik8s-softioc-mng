@@ -113,3 +113,42 @@ class TestJobBase:
         result = j.run()
         assert not result.success
         assert "boom" in result.message
+
+
+# ------------------------------------------------------------------
+# Device resolver tests
+# ------------------------------------------------------------------
+
+
+class TestDeviceResolver:
+    def test_task_uses_resolver_when_set(self):
+        fake_devices = {"MOT1": object(), "MOT2": object()}
+        resolver = lambda name: fake_devices.get(name)
+        t = DummyTask(name="res", device_resolver=resolver)
+        assert t.get_device("MOT1") is fake_devices["MOT1"]
+        assert t.get_device("MISSING") is None
+
+    def test_task_falls_back_to_dict_without_resolver(self):
+        dev = object()
+        t = DummyTask(name="dict", ophyd_devices={"A": dev})
+        assert t.get_device("A") is dev
+
+    def test_job_uses_resolver_when_set(self):
+        dev = object()
+        resolver = lambda name: dev if name == "X" else None
+        j = DummyJob(name="jres", device_resolver=resolver)
+        assert j.get_device("X") is dev
+
+    def test_resolver_is_singleton(self):
+        """Resolver should return same object on repeated calls (singleton)."""
+        created = {}
+
+        def resolver(name):
+            if name not in created:
+                created[name] = object()
+            return created[name]
+
+        t = DummyTask(name="singleton", device_resolver=resolver)
+        a = t.get_device("DEV1")
+        b = t.get_device("DEV1")
+        assert a is b

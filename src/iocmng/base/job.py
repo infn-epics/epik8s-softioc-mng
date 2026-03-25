@@ -67,6 +67,7 @@ class JobBase(ABC):
         beamline_config: Optional[Dict[str, Any]] = None,
         ophyd_devices: Optional[Dict[str, object]] = None,
         prefix: Optional[str] = None,
+        device_resolver: Optional[Any] = None,
     ):
         """Initialize a job.
 
@@ -77,12 +78,14 @@ class JobBase(ABC):
             beamline_config: Full beamline configuration dict.
             ophyd_devices: Dictionary of Ophyd device instances.
             prefix: PV prefix (overrides beamline_config).
+            device_resolver: Optional callable(name) -> device for lazy creation.
         """
         self.name = name
         self.parameters = parameters or {}
         self.pv_definitions = pv_definitions or {}
         self.beamline_config = beamline_config or {}
         self.ophyd_devices = ophyd_devices or {}
+        self._device_resolver = device_resolver
         self.logger = logging.getLogger(f"iocmng.job.{name}")
         self._last_result: Optional[JobResult] = None
 
@@ -232,6 +235,9 @@ class JobBase(ABC):
         return self._last_result
 
     def get_device(self, device_name: str):
+        """Get an Ophyd device by name (lazy-created singleton if resolver is set)."""
+        if self._device_resolver is not None:
+            return self._device_resolver(device_name)
         return self.ophyd_devices.get(device_name)
 
     def list_devices(self):

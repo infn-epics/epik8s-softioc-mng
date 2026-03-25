@@ -1,9 +1,96 @@
-"""Tests for the REST API endpoints."""
+"""Tests for the REST API endpoints.
+
+Covers every route with both happy-path and error cases.
+Uses a local bare git repo instead of a real remote — no network needed.
+"""
+
+import subprocess
+import textwrap
+from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from iocmng.api.app import create_app
+
+
+# ---------------------------------------------------------------------------
+# Helpers — build a tiny local git repo that the loader can clone
+# ---------------------------------------------------------------------------
+
+TASK_CODE = textwrap.dedent("""\
+    from iocmng import TaskBase
+
+    class SimpleTask(TaskBase):
+        def initialize(self):
+            pass
+        def execute(self):
+            pass
+        def cleanup(self):
+            pass
+""")
+
+JOB_CODE = textwrap.dedent("""\
+    from iocmng import JobBase
+    from iocmng.base.job import JobResult
+
+    class SimpleJob(JobBase):
+        def initialize(self):
+            pass
+        def execute(self):
+            return JobResult(success=True, data={}, message="ok")
+""")
+
+TASK_CONFIG = {
+    "parameters": {"mode": "continuous", "interval": 0.1, "threshold": 50.0},
+    "pvs": {"outputs": {"VALUE": {"type": "float", "value": 0.0}}},
+}
+
+JOB_CONFIG = {
+    "parameters": {"mode": "job"},
+}
+
+
+def _make_git_repo(tmp_path: Path, subdir: str, python_code: str, config: dict) -> str:
+    """Create a bare git repo containing a plugin at *subdir* and return its file URL."""
+    # Working tree
+    work = tmp_path / "work"
+    work.mkdir()
+    src = work / subdir
+    src.mkdir(parents=True)
+    (src / "plugin.py").write_text(python_code)
+    (src / "config.yaml").write_text(yaml.dump(config))
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=work, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=work,
+                   check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=work,
+                   check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=work, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=work, check=True,
+                   capture_output=True)
+
+    # Bare repo the loader will clone from
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "clone", "--bare", str(work), str(bare)],
+                   check=True, capture_output=True)
+    return f"file://{bare}"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def task_repo(tmp_path):
+    return _make_git_repo(tmp_path, "task", TASK_CODE, TASK_CONFIG)
+
+
+@pytest.fixture
+def job_repo(tmp_path):
+    return _make_git_repo(tmp_path, "job", JOB_CODE, JOB_CONFIG)
 
 
 @pytest.fixture
@@ -12,60 +99,290 @@ def client(tmp_path):
     return TestClient(app)
 
 
-class TestHealthEndpoint:
-    def test_health(self, client):
-        resp = client.get("/api/v1/health")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "ok"
-        assert "version" in data
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+class TestHealth:
+    def test_health_ok(self, client):
+        r = client.get("/api/v1/health")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["status"] == "ok"
+        assert "version" in d
+        assert "tasks_count" in d
+        assert "jobs_count" in d
 
 
-class TestTaskEndpoints:
+# ---------------------------------------------------------------------------
+# Unified /api/v1/plugins
+# ---------------------------------------------------------------------------
+
+class TestPluginsEndpoint:
+    def test_list_empty(self, client):
+        r = client.get("/api/v1/plugins")
+        assert r.status_code == 200
+        assert r.json() == {"plugins": [], "count": 0}
+
+    def test_list_filter_type(self, client):
+        r = client.get("/api/v1/plugins?type=task")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+    def test_add_task_plugin(self, client, task_repo, tmp_path):
+        r = client.post("/api/v1/plugins", json={
+            "name": "my-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        assert r.status_code == 200
+        d = r.json()
+        assert d["ok"] is True, d["message"]
+        assert "my-task" in d["message"]
+
+    def test_add_task_then_list(self, client, task_repo):
+        client.post("/api/v1/plugins", json={
+            "name": "listed-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.get("/api/v1/plugins")
+        assert r.json()["count"] == 1
+        assert r.json()["plugins"][0]["name"] == "listed-task"
+
+    def test_add_task_then_filter(self, client, task_repo):
+        client.post("/api/v1/plugins", json={
+            "name": "filter-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        assert client.get("/api/v1/plugins?type=task").json()["count"] == 1
+        assert client.get("/api/v1/plugins?type=job").json()["count"] == 0
+
+    def test_get_plugin(self, client, task_repo):
+        client.post("/api/v1/plugins", json={
+            "name": "get-me",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.get("/api/v1/plugins/get-me")
+        assert r.status_code == 200
+        assert r.json()["name"] == "get-me"
+
+    def test_get_nonexistent_plugin(self, client):
+        assert client.get("/api/v1/plugins/ghost").status_code == 404
+
+    def test_add_duplicate_rejected(self, client, task_repo):
+        body = {"name": "dup", "git_url": task_repo, "branch": "main", "path": "task"}
+        client.post("/api/v1/plugins", json=body)
+        r2 = client.post("/api/v1/plugins", json=body)
+        assert r2.status_code == 200
+        assert r2.json()["ok"] is False
+        assert "already exists" in r2.json()["message"]
+
+    def test_delete_plugin(self, client, task_repo):
+        client.post("/api/v1/plugins", json={
+            "name": "del-me",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.delete("/api/v1/plugins/del-me")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert client.get("/api/v1/plugins").json()["count"] == 0
+
+    def test_delete_nonexistent(self, client):
+        assert client.delete("/api/v1/plugins/ghost").status_code == 404
+
+    def test_restart_plugin(self, client, task_repo):
+        client.post("/api/v1/plugins", json={
+            "name": "restart-me",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.post("/api/v1/plugins/restart-me/restart")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_restart_nonexistent(self, client):
+        assert client.post("/api/v1/plugins/ghost/restart").status_code == 404
+
+    def test_invalid_name_rejected(self, client, task_repo):
+        r = client.post("/api/v1/plugins", json={
+            "name": "bad name!",
+            "git_url": task_repo,
+        })
+        assert r.status_code == 422
+
+    def test_parameters_override(self, client, task_repo):
+        r = client.post("/api/v1/plugins", json={
+            "name": "param-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+            "parameters": {"threshold": 99.0},
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_add_job_plugin(self, client, job_repo):
+        r = client.post("/api/v1/plugins", json={
+            "name": "my-job",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_run_job_via_unified(self, client, job_repo):
+        client.post("/api/v1/plugins", json={
+            "name": "runnable-job",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        r = client.post("/api/v1/plugins/runnable-job/run")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_run_task_as_job_rejected(self, client, task_repo):
+        client.post("/api/v1/plugins", json={
+            "name": "not-a-job",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.post("/api/v1/plugins/not-a-job/run")
+        assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/tasks (type-scoped alias)
+# ---------------------------------------------------------------------------
+
+class TestTasksAlias:
     def test_list_tasks_empty(self, client):
-        resp = client.get("/api/v1/tasks")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["count"] == 0
-        assert data["plugins"] == []
+        r = client.get("/api/v1/tasks")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
 
-    def test_add_task_invalid_name(self, client):
-        resp = client.post(
-            "/api/v1/tasks",
-            json={"name": "invalid name!", "git_url": "https://example.com/repo.git"},
-        )
-        assert resp.status_code == 422  # Pydantic validation error
+    def test_add_and_list(self, client, task_repo):
+        client.post("/api/v1/tasks", json={
+            "name": "t1",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.get("/api/v1/tasks")
+        assert r.json()["count"] == 1
 
-    def test_add_task_with_path(self, client):
-        resp = client.post(
-            "/api/v1/tasks",
-            json={
-                "name": "test_path_task",
-                "git_url": "https://example.com/repo.git",
-                "path": "src/my_task",
-            },
-        )
-        # Clone will fail since the URL is fake, but we validate the request is accepted
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is False  # git clone fails
+    def test_add_job_via_tasks_rejected(self, client, job_repo):
+        r = client.post("/api/v1/tasks", json={
+            "name": "wrong-type",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+        assert "not a task" in r.json()["message"].lower() or "job" in r.json()["message"].lower()
 
-    def test_remove_nonexistent_task(self, client):
-        resp = client.delete("/api/v1/tasks/nonexistent")
-        assert resp.status_code == 404
+    def test_get_task(self, client, task_repo):
+        client.post("/api/v1/tasks", json={
+            "name": "get-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.get("/api/v1/tasks/get-task")
+        assert r.status_code == 200
+
+    def test_delete_task(self, client, task_repo):
+        client.post("/api/v1/tasks", json={
+            "name": "del-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        r = client.delete("/api/v1/tasks/del-task")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_delete_nonexistent_task(self, client):
+        assert client.delete("/api/v1/tasks/ghost").status_code == 404
 
 
-class TestJobEndpoints:
+# ---------------------------------------------------------------------------
+# /api/v1/jobs (type-scoped alias)
+# ---------------------------------------------------------------------------
+
+class TestJobsAlias:
     def test_list_jobs_empty(self, client):
-        resp = client.get("/api/v1/jobs")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["count"] == 0
+        assert client.get("/api/v1/jobs").json()["count"] == 0
 
-    def test_remove_nonexistent_job(self, client):
-        resp = client.delete("/api/v1/jobs/nonexistent")
-        assert resp.status_code == 404
+    def test_add_and_list(self, client, job_repo):
+        client.post("/api/v1/jobs", json={
+            "name": "j1",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        assert client.get("/api/v1/jobs").json()["count"] == 1
+
+    def test_add_task_via_jobs_rejected(self, client, task_repo):
+        r = client.post("/api/v1/jobs", json={
+            "name": "wrong-type",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
+    def test_run_job(self, client, job_repo):
+        client.post("/api/v1/jobs", json={
+            "name": "run-j",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        r = client.post("/api/v1/jobs/run-j/run")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
 
     def test_run_nonexistent_job(self, client):
-        resp = client.post("/api/v1/jobs/nonexistent/run")
-        assert resp.status_code == 404
+        assert client.post("/api/v1/jobs/ghost/run").status_code == 404
+
+    def test_delete_job(self, client, job_repo):
+        client.post("/api/v1/jobs", json={
+            "name": "del-job",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        r = client.delete("/api/v1/jobs/del-job")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_delete_nonexistent_job(self, client):
+        assert client.delete("/api/v1/jobs/ghost").status_code == 404
+
+    def test_get_job(self, client, job_repo):
+        client.post("/api/v1/jobs", json={
+            "name": "get-job",
+            "git_url": job_repo,
+            "branch": "main",
+            "path": "job",
+        })
+        assert client.get("/api/v1/jobs/get-job").status_code == 200
+
+    def test_get_nonexistent_job(self, client):
+        assert client.get("/api/v1/jobs/ghost").status_code == 404
+

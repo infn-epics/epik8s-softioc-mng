@@ -26,7 +26,7 @@ def create_app(
     beamline_path: Optional[str] = None,
     plugins_dir: Optional[str] = None,
     plugins_config_path: Optional[str] = None,
-    disable_ophyd: bool = True,
+    disable_ophyd: bool = False,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -38,7 +38,7 @@ def create_app(
             startup (see ``IOCMNG_PLUGINS_CONFIG`` env var).  Each entry may
             contain: ``name``, ``git_url``, ``path``, ``branch``, ``pat``,
             ``auto_start``, ``parameters``.
-        disable_ophyd: Skip ophyd initialization (default True for API mode).
+        disable_ophyd: Skip ophyd initialization (default False for API mode).
 
     Returns:
         Configured FastAPI instance.
@@ -93,7 +93,7 @@ def run_server():
     plugins_config_path = os.environ.get("IOCMNG_PLUGINS_CONFIG", None)
     host = os.environ.get("IOCMNG_HOST", "0.0.0.0")
     port = int(os.environ.get("IOCMNG_PORT", "8080"))
-    disable_ophyd = os.environ.get("IOCMNG_DISABLE_OPHYD", "true").lower() == "true"
+    disable_ophyd = os.environ.get("IOCMNG_DISABLE_OPHYD", "false").lower() == "true"
 
     log_level = os.environ.get("IOCMNG_LOG_LEVEL", "info").lower()
     logging.basicConfig(

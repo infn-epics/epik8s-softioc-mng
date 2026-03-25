@@ -15,6 +15,8 @@ class AddPluginRequest(BaseModel):
     pat: Optional[str] = Field(None, description="Personal Access Token for private repos")
     branch: str = Field("main", description="Branch or tag to clone")
     auto_start: bool = Field(True, description="Start task immediately after loading")
+    auto_start_on_boot: bool = Field(False, description="Persist plugin for IOCMNG startup autoload")
+    autostart_order: Optional[int] = Field(None, description="Autostart order on IOCMNG boot (lower starts first)")
     parameters: Optional[Dict[str, Any]] = Field(None, description="Extra parameters merged into config.yaml parameters")
 
 
@@ -74,3 +76,16 @@ class HealthResponse(BaseModel):
     version: str
     tasks_count: int
     jobs_count: int
+
+
+class TaskStartupInfoResponse(BaseModel):
+    """Startup metadata for a loaded task."""
+
+    name: str
+    plugin_type: str
+    auto_start: bool
+    auto_start_on_boot: bool
+    autostart_order: Optional[int] = None
+    start_parameters: Dict[str, Any]
+    pv_definitions: Dict[str, Any]
+    built_pvs: List[str]

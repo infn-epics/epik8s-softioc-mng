@@ -13,6 +13,7 @@ from iocmng.api.models import (
     PluginListResponse,
     PluginResponse,
     RestartResponse,
+    TaskStartupInfoResponse,
 )
 from iocmng.core.controller import IocMngController
 
@@ -57,6 +58,8 @@ async def add_plugin(req: AddPluginRequest):
         branch=req.branch,
         path=req.path,
         auto_start=req.auto_start,
+        auto_start_on_boot=req.auto_start_on_boot,
+        autostart_order=req.autostart_order,
         parameters=req.parameters,
     )
     return PluginResponse(ok=ok, message=msg, validation=validation)
@@ -140,6 +143,8 @@ async def add_task(req: AddPluginRequest):
         branch=req.branch,
         path=req.path,
         auto_start=req.auto_start,
+        auto_start_on_boot=req.auto_start_on_boot,
+        autostart_order=req.autostart_order,
         parameters=req.parameters,
     )
     if ok and validation and validation.get("plugin_type") != "task":
@@ -183,6 +188,16 @@ async def get_task(name: str):
     return info
 
 
+@router.get("/tasks/{name}/startup", response_model=TaskStartupInfoResponse)
+async def get_task_startup(name: str):
+    """Get startup parameters and PV definitions for a loaded task."""
+    ctrl = _get_controller()
+    startup = ctrl.get_task_startup_info(name)
+    if not startup:
+        raise HTTPException(status_code=404, detail=f"Task '{name}' not found")
+    return startup
+
+
 # ------------------------------------------------------------------
 # Jobs (type-scoped convenience aliases)
 # ------------------------------------------------------------------
@@ -199,6 +214,8 @@ async def add_job(req: AddPluginRequest):
         branch=req.branch,
         path=req.path,
         auto_start=False,  # Jobs don't auto-start
+        auto_start_on_boot=False,
+        autostart_order=None,
         parameters=req.parameters,
     )
     if ok and validation and validation.get("plugin_type") != "job":

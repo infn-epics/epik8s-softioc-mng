@@ -359,6 +359,35 @@ class TestTasksAlias:
         assert r.status_code == 200
         assert r.json()["count"] == 0
 
+    def test_get_task_startup_info(self, client, task_repo):
+        r_add = client.post("/api/v1/tasks", json={
+            "name": "startup-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+            "parameters": {"threshold": 77.0},
+            "auto_start": True,
+            "auto_start_on_boot": True,
+            "autostart_order": 5,
+        })
+        assert r_add.status_code == 200
+        assert r_add.json()["ok"] is True
+
+        r = client.get("/api/v1/tasks/startup-task/startup")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["name"] == "startup-task"
+        assert d["plugin_type"] == "task"
+        assert d["auto_start"] is True
+        assert d["auto_start_on_boot"] is True
+        assert d["autostart_order"] == 5
+        assert d["start_parameters"]["threshold"] == 77.0
+        assert "outputs" in d["pv_definitions"]
+
+    def test_get_task_startup_info_missing(self, client):
+        r = client.get("/api/v1/tasks/missing/startup")
+        assert r.status_code == 404
+
     def test_add_and_list(self, client, task_repo):
         client.post("/api/v1/tasks", json={
             "name": "t1",

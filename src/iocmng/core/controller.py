@@ -5,6 +5,7 @@ Central controller that manages loaded tasks and jobs at runtime.
 import logging
 import threading
 from pathlib import Path
+import yaml
 from typing import Any, Dict, List, Optional, Tuple
 
 from iocmng.base.task import TaskBase
@@ -39,6 +40,11 @@ class PluginInfo:
         branch: str = "main",
         pat: Optional[str] = None,
         parameters: Optional[Dict[str, Any]] = None,
+        start_parameters: Optional[Dict[str, Any]] = None,
+        pv_definitions: Optional[Dict[str, Any]] = None,
+        auto_start: bool = False,
+        auto_start_on_boot: bool = False,
+        autostart_order: Optional[int] = None,
         status: str = "loaded",
     ):
         self.name = name
@@ -49,6 +55,11 @@ class PluginInfo:
         self.branch = branch
         self.pat = pat  # stored for restart; never exposed in to_dict()
         self.parameters = parameters or {}
+        self.start_parameters = start_parameters or {}
+        self.pv_definitions = pv_definitions or {}
+        self.auto_start = auto_start
+        self.auto_start_on_boot = auto_start_on_boot
+        self.autostart_order = autostart_order
         self.status = status
         self.instance: Optional[Any] = None
 
@@ -61,6 +72,9 @@ class PluginInfo:
             "path": self.path,
             "branch": self.branch,
             "status": self.status,
+            "auto_start": self.auto_start,
+            "auto_start_on_boot": self.auto_start_on_boot,
+            "autostart_order": self.autostart_order,
         }
         if self.instance and isinstance(self.instance, TaskBase):
             d["running"] = self.instance.running
@@ -86,6 +100,8 @@ class IocMngController:
         self.beamline_config = beamline_config or {}
         self.disable_ophyd = disable_ophyd
         self.loader = PluginLoader(plugins_dir)
+        self._plugins_dir = Path(plugins_dir) if plugins_dir else self.loader.plugins_dir
+        self._autostart_registry_path = self._plugins_dir / "autostart_plugins.yaml"
         self._lock = threading.Lock()
 
         # Loaded plugins: name -> PluginInfo
@@ -243,6 +259,8 @@ class IocMngController:
         branch: str = "main",
         path: str = "",
         auto_start: bool = True,
+        auto_start_on_boot: bool = False,
+        autostart_order: Optional[int] = None,
         parameters: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str, Optional[Dict]]:
         """Add a task or job plugin from a git repository.
@@ -326,6 +344,11 @@ class IocMngController:
             branch=branch,
             pat=pat,
             parameters=parameters or {},
+            start_parameters=merged_params,
+            pv_definitions=pv_defs,
+            auto_start=auto_start,
+            auto_start_on_boot=auto_start_on_boot,
+            autostart_order=autostart_order,
             status="loaded",
         )
         info.instance = instance
@@ -342,6 +365,9 @@ class IocMngController:
             except Exception as e:
                 info.status = "error"
                 return False, f"Start failed: {e}", validation.to_dict()
+
+        if auto_start_on_boot:
+            self._upsert_autostart_registry_entry(info)
 
         return True, f"Plugin '{name}' added successfully", validation.to_dict()
 
@@ -369,6 +395,7 @@ class IocMngController:
 
         # Remove files
         ok, msg = self.loader.remove(name)
+        self._remove_autostart_registry_entry(name)
         return True, f"Plugin '{name}' removed"
 
     def run_job(self, name: str) -> Tuple[bool, Optional[Dict]]:
@@ -414,6 +441,26 @@ class IocMngController:
         with self._lock:
             info = self._plugins.get(name)
         return info.to_dict() if info else None
+
+    def get_task_startup_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return startup metadata (parameters/PVs) for a loaded task."""
+        with self._lock:
+            info = self._plugins.get(name)
+        if info is None or info.plugin_type != "task":
+            return None
+        built_pvs = []
+        if info.instance is not None and hasattr(info.instance, "pvs"):
+            built_pvs = list(getattr(info.instance, "pvs", {}).keys())
+        return {
+            "name": info.name,
+            "plugin_type": info.plugin_type,
+            "auto_start": info.auto_start,
+            "auto_start_on_boot": info.auto_start_on_boot,
+            "autostart_order": info.autostart_order,
+            "start_parameters": info.start_parameters,
+            "pv_definitions": info.pv_definitions,
+            "built_pvs": built_pvs,
+        }
 
     def stop_all(self):
         """Stop all running tasks."""
@@ -525,6 +572,11 @@ class IocMngController:
             branch=info.branch,
             pat=info.pat,
             parameters=info.parameters,
+            start_parameters=merged_params,
+            pv_definitions=pv_defs,
+            auto_start=info.auto_start,
+            auto_start_on_boot=info.auto_start_on_boot,
+            autostart_order=info.autostart_order,
             status="loaded",
         )
         new_info.instance = instance
@@ -541,6 +593,9 @@ class IocMngController:
             except Exception as e:
                 new_info.status = "error"
                 return False, f"Restart failed: {e}", validation.to_dict()
+
+        if new_info.auto_start_on_boot:
+            self._upsert_autostart_registry_entry(new_info)
 
         return True, f"Plugin '{name}' restarted successfully", validation.to_dict()
 
@@ -560,8 +615,17 @@ class IocMngController:
         Returns:
             List of result dicts with ``name``, ``ok``, and ``message``.
         """
+        def _sort_key(p: Dict[str, Any]):
+            order = p.get("autostart_order")
+            if order is None:
+                return (1, 0, p.get("name", ""))
+            try:
+                return (0, int(order), p.get("name", ""))
+            except Exception:
+                return (1, 0, p.get("name", ""))
+
         results = []
-        for p in plugins:
+        for p in sorted(plugins, key=_sort_key):
             name = p.get("name")
             git_url = p.get("git_url")
             if not name or not git_url:
@@ -574,6 +638,8 @@ class IocMngController:
                 branch=p.get("branch", "main"),
                 path=p.get("path", ""),
                 auto_start=p.get("auto_start", True),
+                auto_start_on_boot=p.get("auto_start_on_boot", False),
+                autostart_order=p.get("autostart_order"),
                 parameters=p.get("parameters"),
             )
             if ok:
@@ -582,3 +648,58 @@ class IocMngController:
                 logger.error(f"Initial plugin '{name}' failed: {msg}")
             results.append({"name": name, "ok": ok, "message": msg})
         return results
+
+    # ------------------------------------------------------------------
+    # Autostart persistence
+    # ------------------------------------------------------------------
+
+    def _read_autostart_registry(self) -> List[Dict[str, Any]]:
+        if not self._autostart_registry_path.exists():
+            return []
+        try:
+            with open(self._autostart_registry_path, "r") as f:
+                data = yaml.safe_load(f) or {}
+            return data.get("plugins", [])
+        except Exception as e:
+            logger.warning("Failed reading autostart registry: %s", e)
+            return []
+
+    def _write_autostart_registry(self, plugins: List[Dict[str, Any]]) -> None:
+        self._autostart_registry_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._autostart_registry_path, "w") as f:
+            yaml.safe_dump({"plugins": plugins}, f, sort_keys=False)
+
+    def _upsert_autostart_registry_entry(self, info: PluginInfo) -> None:
+        if info.plugin_type != "task":
+            return
+        entries = self._read_autostart_registry()
+        new_entry = {
+            "name": info.name,
+            "git_url": info.git_url,
+            "path": info.path,
+            "branch": info.branch,
+            "pat": info.pat,
+            "auto_start": True,
+            "auto_start_on_boot": True,
+            "autostart_order": info.autostart_order,
+            "parameters": info.parameters,
+        }
+        replaced = False
+        for i, e in enumerate(entries):
+            if e.get("name") == info.name:
+                entries[i] = new_entry
+                replaced = True
+                break
+        if not replaced:
+            entries.append(new_entry)
+        self._write_autostart_registry(entries)
+
+    def _remove_autostart_registry_entry(self, name: str) -> None:
+        entries = self._read_autostart_registry()
+        filtered = [e for e in entries if e.get("name") != name]
+        if len(filtered) != len(entries):
+            self._write_autostart_registry(filtered)
+
+    def load_persisted_autostart_plugins(self) -> List[Dict[str, Any]]:
+        """Load persisted autostart tasks configured by REST uploads."""
+        return self._read_autostart_registry()

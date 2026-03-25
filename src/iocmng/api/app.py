@@ -59,10 +59,20 @@ def create_app(
     async def lifespan(app: FastAPI):
         import iocmng
         logging.info(f"IOC Manager v{iocmng.__version__} starting up")
-        # Load initial plugins defined in IOCMNG_PLUGINS_CONFIG
-        if initial_plugins:
-            logging.info(f"Loading {len(initial_plugins)} initial plugin(s) from config")
-            results = controller.add_plugins_from_config(initial_plugins)
+        # Load initial plugins defined in IOCMNG_PLUGINS_CONFIG, then merge
+        # with persisted autostart plugins uploaded through REST API.
+        persisted_plugins = controller.load_persisted_autostart_plugins()
+        startup_plugins = list(initial_plugins)
+        seen = {p.get("name") for p in startup_plugins if p.get("name")}
+        for p in persisted_plugins:
+            name = p.get("name")
+            if name and name not in seen:
+                startup_plugins.append(p)
+                seen.add(name)
+
+        if startup_plugins:
+            logging.info(f"Loading {len(startup_plugins)} startup plugin(s)")
+            results = controller.add_plugins_from_config(startup_plugins)
             failed = [r for r in results if not r["ok"]]
             if failed:
                 logging.warning(f"{len(failed)} initial plugin(s) failed to load: "

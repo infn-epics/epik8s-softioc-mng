@@ -206,6 +206,15 @@ class TaskBase(ABC):
     def start(self):
         """Start the task in its own thread."""
         self.logger.info(f"Starting task: {self.name}")
+        # AS info dump for traceability at startup.
+        self.logger.info(
+            "AS_INFO task=%s mode=%s pv_prefix=%s parameters=%s pv_definitions=%s",
+            self.name,
+            self.mode,
+            self.pv_prefix,
+            self.parameters,
+            self.pv_definitions,
+        )
         self.running = True
         self.set_status("RUN")
         self.set_message("Task running")

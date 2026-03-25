@@ -42,10 +42,12 @@ class PluginInfo:
         parameters: Optional[Dict[str, Any]] = None,
         start_parameters: Optional[Dict[str, Any]] = None,
         pv_definitions: Optional[Dict[str, Any]] = None,
+        plugin_prefix: Optional[str] = None,
         auto_start: bool = False,
         auto_start_on_boot: bool = False,
         autostart_order: Optional[int] = None,
         status: str = "loaded",
+        validation: Optional[Dict[str, Any]] = None,
     ):
         self.name = name
         self.git_url = git_url
@@ -57,10 +59,12 @@ class PluginInfo:
         self.parameters = parameters or {}
         self.start_parameters = start_parameters or {}
         self.pv_definitions = pv_definitions or {}
+        self.plugin_prefix = plugin_prefix
         self.auto_start = auto_start
         self.auto_start_on_boot = auto_start_on_boot
         self.autostart_order = autostart_order
         self.status = status
+        self.validation = validation
         self.instance: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -101,6 +105,11 @@ class PluginInfo:
             "auto_start_on_boot": self.auto_start_on_boot,
             "autostart_order": self.autostart_order,
             "pv_prefix": self.instance.pv_prefix if self.instance and hasattr(self.instance, "pv_prefix") else None,
+            "plugin_prefix": (
+                getattr(self.instance, "plugin_prefix", None)
+                if self.instance is not None
+                else (self.plugin_prefix or self.name.upper())
+            ),
             "mode": mode,
             "parameters": self.parameters,
             "start_parameters": self.start_parameters,
@@ -113,6 +122,8 @@ class PluginInfo:
         if self.instance and isinstance(self.instance, TaskBase):
             d["running"] = self.instance.running
             d["cycle_count"] = self.instance.cycle_count
+        if self.validation is not None:
+            d["validation"] = self.validation
         return d
 
 
@@ -321,35 +332,36 @@ class IocMngController:
             Tuple of (success, message, validation_dict_or_None).
         """
         with self._lock:
-            if name in self._plugins:
+            if name in self._plugins or self.loader.is_loaded(name):
                 return False, f"Plugin '{name}' already exists", None
 
         # 1. Clone (force=True removes any stale directory from a previous failed attempt)
-        ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch, force=True)
+        ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch, path=path, force=True)
         if not ok:
             return False, msg, None
 
         # 2. Install requirements
-        ok, msg = self.loader.install_requirements(name, path=path)
+        ok, msg = self.loader.install_requirements(name)
         if not ok:
             self.loader.remove(name)
             return False, f"Dependency installation failed: {msg}", None
 
         # 3. Load per-plugin config.yaml
-        plugin_config = self.loader.load_plugin_config(name, path=path)
+        plugin_config = self.loader.load_plugin_config(name)
         # Merge: REST parameters override config.yaml parameters
         cfg_params = plugin_config.get("parameters", {})
         merged_params = _deep_merge(cfg_params, parameters or {})
         pv_defs = plugin_config.get("pvs", {})
+        plugin_prefix = plugin_config.get("prefix")
 
         # 4. Validate
-        validation = self.loader.validate(name, path=path)
+        validation = self.loader.validate(name)
         if not validation.ok:
             self.loader.remove(name)
             return False, "Validation failed", validation.to_dict()
 
         # 5. Load class
-        cls, load_result = self.loader.load_class(name, path=path)
+        cls, load_result = self.loader.load_class(name)
         if cls is None:
             self.loader.remove(name)
             return False, "Failed to load class", load_result.to_dict()
@@ -363,6 +375,7 @@ class IocMngController:
                 beamline_config=self.beamline_config,
                 ophyd_devices=self.ophyd_devices,
                 prefix=self.config.get("prefix"),
+                plugin_prefix=plugin_prefix,
                 device_resolver=self.get_device,
             )
         except Exception as e:
@@ -380,6 +393,7 @@ class IocMngController:
             parameters=parameters or {},
             start_parameters=merged_params,
             pv_definitions=pv_defs,
+            plugin_prefix=plugin_prefix,
             auto_start=auto_start,
             auto_start_on_boot=auto_start_on_boot,
             autostart_order=autostart_order,
@@ -389,6 +403,16 @@ class IocMngController:
 
         with self._lock:
             self._plugins[name] = info
+
+        logger.info(
+            "AS_INFO_LOAD plugin=%s type=%s pv_prefix=%s parameters=%s pv_definitions=%s built_pvs=%s",
+            info.name,
+            info.plugin_type,
+            getattr(instance, "pv_prefix", None),
+            merged_params,
+            pv_defs,
+            info.to_dict().get("built_pvs", []),
+        )
 
         # Auto-start tasks
         if load_result.plugin_type == "task" and auto_start:
@@ -402,6 +426,21 @@ class IocMngController:
 
         if auto_start_on_boot:
             self._upsert_autostart_registry_entry(info)
+
+        self.loader.write_plugin_metadata(
+            name,
+            {
+                "name": name,
+                "git_url": git_url,
+                "branch": branch,
+                "source_path": path,
+                "plugin_type": load_result.plugin_type,
+                "class_name": load_result.class_name,
+                "auto_start": auto_start,
+                "auto_start_on_boot": auto_start_on_boot,
+                "autostart_order": autostart_order,
+            },
+        )
 
         return True, f"Plugin '{name}' added successfully", validation.to_dict()
 
@@ -418,6 +457,10 @@ class IocMngController:
             info = self._plugins.pop(name, None)
 
         if info is None:
+            ok, _ = self.loader.remove(name)
+            if ok:
+                self._remove_autostart_registry_entry(name)
+                return True, f"Plugin '{name}' removed"
             return False, f"Plugin '{name}' not found"
 
         # Stop if it's a running task
@@ -465,6 +508,9 @@ class IocMngController:
         with self._lock:
             plugins = list(self._plugins.values())
 
+        loaded_names = {plugin.name for plugin in plugins}
+        plugins.extend(self._discover_plugins_on_disk(exclude=loaded_names))
+
         if plugin_type:
             plugins = [p for p in plugins if p.plugin_type == plugin_type]
 
@@ -474,7 +520,10 @@ class IocMngController:
         """Get info about a specific plugin."""
         with self._lock:
             info = self._plugins.get(name)
-        return info.to_dict() if info else None
+        if info:
+            return info.to_dict()
+        discovered = self._discover_plugin_on_disk(name)
+        return discovered.to_dict() if discovered else None
 
     def get_plugin_startup_info(
         self, name: str, expected_type: Optional[str] = None
@@ -482,6 +531,8 @@ class IocMngController:
         """Return startup metadata (parameters/PVs) for a loaded plugin."""
         with self._lock:
             info = self._plugins.get(name)
+        if info is None:
+            info = self._discover_plugin_on_disk(name)
         if info is None:
             return None
         if expected_type and info.plugin_type != expected_type:
@@ -495,6 +546,7 @@ class IocMngController:
             "auto_start_on_boot": startup["auto_start_on_boot"],
             "autostart_order": startup["autostart_order"],
             "pv_prefix": startup.get("pv_prefix"),
+            "plugin_prefix": startup.get("plugin_prefix"),
             "mode": startup.get("mode"),
             "start_parameters": startup["start_parameters"],
             "pv_definitions": startup["pv_definitions"],
@@ -511,6 +563,45 @@ class IocMngController:
     def get_job_startup_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Return startup metadata (parameters/PVs) for a loaded job."""
         return self.get_plugin_startup_info(name, expected_type="job")
+
+    def _discover_plugin_on_disk(self, name: str) -> Optional[PluginInfo]:
+        if not self.loader.is_loaded(name):
+            return None
+
+        metadata = self.loader.read_plugin_metadata(name)
+        validation = self.loader.validate(name)
+        plugin_config = self.loader.load_plugin_config(name)
+        plugin_type = validation.plugin_type or metadata.get("plugin_type") or "unknown"
+        class_name = validation.class_name or metadata.get("class_name") or ""
+
+        return PluginInfo(
+            name=name,
+            git_url=metadata.get("git_url", ""),
+            plugin_type=plugin_type,
+            class_name=class_name,
+            path=metadata.get("source_path", ""),
+            branch=metadata.get("branch", "main"),
+            parameters={},
+            start_parameters=plugin_config.get("parameters", {}),
+            pv_definitions=plugin_config.get("pvs", {}),
+            plugin_prefix=plugin_config.get("prefix", name.upper()),
+            auto_start=metadata.get("auto_start", False),
+            auto_start_on_boot=metadata.get("auto_start_on_boot", False),
+            autostart_order=metadata.get("autostart_order"),
+            status="available" if validation.ok else "invalid",
+            validation=validation.to_dict(),
+        )
+
+    def _discover_plugins_on_disk(self, exclude: Optional[set[str]] = None) -> List[PluginInfo]:
+        exclude = exclude or set()
+        discovered: List[PluginInfo] = []
+        for name in self.loader.list_local_plugins():
+            if name in exclude:
+                continue
+            info = self._discover_plugin_on_disk(name)
+            if info is not None:
+                discovered.append(info)
+        return discovered
 
     def stop_all(self):
         """Stop all running tasks."""
@@ -554,30 +645,31 @@ class IocMngController:
             self.loader.remove(temp_name)
 
         # 1. Clone to temp
-        ok, msg = self.loader.clone(temp_name, info.git_url, pat=info.pat, branch=info.branch)
+        ok, msg = self.loader.clone(temp_name, info.git_url, pat=info.pat, branch=info.branch, path=info.path)
         if not ok:
             return False, f"Re-clone failed: {msg}", None
 
         # 2. Install requirements in temp
-        ok, msg = self.loader.install_requirements(temp_name, path=info.path)
+        ok, msg = self.loader.install_requirements(temp_name)
         if not ok:
             self.loader.remove(temp_name)
             return False, f"Dependency installation failed: {msg}", None
 
         # 3. Load config from temp, merge with original parameters
-        plugin_config = self.loader.load_plugin_config(temp_name, path=info.path)
+        plugin_config = self.loader.load_plugin_config(temp_name)
         cfg_params = plugin_config.get("parameters", {})
         merged_params = _deep_merge(cfg_params, info.parameters)
         pv_defs = plugin_config.get("pvs", {})
+        plugin_prefix = plugin_config.get("prefix")
 
         # 4. Validate temp
-        validation = self.loader.validate(temp_name, path=info.path)
+        validation = self.loader.validate(temp_name)
         if not validation.ok:
             self.loader.remove(temp_name)
             return False, "Validation failed", validation.to_dict()
 
         # 5. Load class from temp (verify it is importable)
-        cls, load_result = self.loader.load_class(temp_name, path=info.path)
+        cls, load_result = self.loader.load_class(temp_name)
         if cls is None:
             self.loader.remove(temp_name)
             return False, "Failed to load class", load_result.to_dict()
@@ -608,6 +700,7 @@ class IocMngController:
                 beamline_config=self.beamline_config,
                 ophyd_devices=self.ophyd_devices,
                 prefix=self.config.get("prefix"),
+                plugin_prefix=plugin_prefix,
                 device_resolver=self.get_device,
             )
         except Exception as e:
@@ -624,6 +717,7 @@ class IocMngController:
             parameters=info.parameters,
             start_parameters=merged_params,
             pv_definitions=pv_defs,
+            plugin_prefix=plugin_prefix,
             auto_start=info.auto_start,
             auto_start_on_boot=info.auto_start_on_boot,
             autostart_order=info.autostart_order,
@@ -646,6 +740,31 @@ class IocMngController:
 
         if new_info.auto_start_on_boot:
             self._upsert_autostart_registry_entry(new_info)
+
+        logger.info(
+            "AS_INFO_LOAD plugin=%s type=%s pv_prefix=%s parameters=%s pv_definitions=%s built_pvs=%s",
+            new_info.name,
+            new_info.plugin_type,
+            getattr(instance, "pv_prefix", None),
+            merged_params,
+            pv_defs,
+            new_info.to_dict().get("built_pvs", []),
+        )
+
+        self.loader.write_plugin_metadata(
+            name,
+            {
+                "name": name,
+                "git_url": info.git_url,
+                "branch": info.branch,
+                "source_path": info.path,
+                "plugin_type": load_result.plugin_type,
+                "class_name": load_result.class_name,
+                "auto_start": info.auto_start,
+                "auto_start_on_boot": info.auto_start_on_boot,
+                "autostart_order": info.autostart_order,
+            },
+        )
 
         return True, f"Plugin '{name}' restarted successfully", validation.to_dict()
 

@@ -12,8 +12,10 @@ A pluggable task/job framework for IOC Manager applications. Provides base class
 - **EPICS soft IOC PVs** — every task and job gets default PVs (STATUS, MESSAGE, etc.) via `softioc`
 - **Per-plugin `config.yaml`** — each plugin defines its PVs and parameters in a config file inside its git repo
 - **Path support** — specify a sub-directory inside the git repo where the plugin sources live
+- **Staged plugin path** — when `path` is provided only that sub-directory is stored under `IOCMNG_PLUGINS_DIR/<plugin-name>`
 - **Autostart persistence** — uploaded tasks can be persisted for automatic reload on IOC Manager startup
 - **Autostart ordering** — define deterministic startup order for autostart tasks
+- **On-disk plugin discovery** — `/api/v1/plugins` also reports plugin directories present on disk even when they are not loaded in memory
 - **Plugin `requirements.txt`** — plugins can ship their own dependencies
 - **Optional Ophyd integration** — device abstraction via `ophyd`/`infn_ophyd_hal` (optional dependency)
 - **Docker image** — ready-to-run container with the REST API
@@ -170,6 +172,12 @@ curl "http://localhost:8080/api/v1/plugins?type=task"
 curl "http://localhost:8080/api/v1/plugins?type=job"
 ```
 
+The unified plugin list includes:
+
+- loaded plugins currently running or available in memory
+- plugin directories already present under `IOCMNG_PLUGINS_DIR`
+- per-plugin validation details and a `status` such as `running`, `loaded`, `available`, or `invalid`
+
 #### Type-scoped aliases
 ```bash
 # Tasks
@@ -197,6 +205,7 @@ Example response:
   "auto_start": true,
   "auto_start_on_boot": true,
   "autostart_order": 10,
+  "plugin_prefix": "MY_MONITOR",
   "start_parameters": {
     "mode": "continuous",
     "interval": 1.0,
@@ -227,6 +236,8 @@ Each plugin lives in a git repository (or a sub-directory of one). The expected 
     ├── config.yaml         # Plugin configuration (PVs, parameters)
     └── requirements.txt    # Optional additional pip dependencies
 ```
+
+  If the REST request uses `path`, IOC Manager clones the repository into a temporary location, validates the selected sub-directory, and stores only that staged plugin directory under `IOCMNG_PLUGINS_DIR/<plugin-name>`. If a repository-level `requirements.txt` exists and the selected sub-directory does not provide its own, the requirements file is copied alongside the staged plugin so dependency installation still works.
 
 ### config.yaml Format
 
@@ -259,6 +270,26 @@ pvs:
       onam: "ALARM"         # one-state name (bool only)
 ```
 
+`config.yaml`, `config.yml`, and `config.json` are supported. The config file is structurally validated before the plugin is accepted.
+
+You may also define an optional top-level `prefix` in the plugin config. This is the task/job-specific PV prefix segment appended to the controller prefix.
+
+Example:
+
+```yaml
+prefix: CHECK_MOTOR
+parameters:
+  mode: continuous
+```
+
+If the controller prefix is `SPARC:CONTROL`, the task PVs become:
+
+- `SPARC:CONTROL:CHECK_MOTOR:STATUS`
+- `SPARC:CONTROL:CHECK_MOTOR:MESSAGE`
+- `SPARC:CONTROL:CHECK_MOTOR:<CUSTOM_PV>`
+
+If `prefix` is omitted, IOC Manager falls back to the plugin name uppercased.
+
 ## Plugin Validation
 
 When a task or job is added, the framework performs the following checks:
@@ -275,13 +306,21 @@ If any check fails, the plugin is rejected and the error details are returned.
 
 ## Task Startup Logging (AS Info)
 
-When a task starts, IOC Manager emits an `INFO` log line with startup metadata:
+When a plugin is loaded and when a task starts, IOC Manager emits `INFO` log lines with effective metadata:
 
 - task name
+- plugin type
 - mode
 - PV prefix
 - effective start parameters
 - PV definitions
+- effective PV list
+
+Load-time example:
+
+```text
+AS_INFO_LOAD plugin=my-monitor type=task pv_prefix=SPARC:CONTROL:CHECK_MOTOR parameters={'interval': 1.0, 'threshold': 80.0} pv_definitions={'outputs': {'VALUE': {'type': 'float', 'value': 0.0}}} built_pvs=['ENABLE', 'STATUS', 'MESSAGE', 'CYCLE_COUNT', 'VALUE']
+```
 
 Example log line:
 

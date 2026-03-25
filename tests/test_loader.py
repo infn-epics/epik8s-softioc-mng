@@ -1,5 +1,6 @@
 """Tests for the plugin loader — path support and config.yaml loading."""
 
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -60,6 +61,13 @@ class TestLoadPluginConfig:
         cfg = loader.load_plugin_config("p4")
         assert cfg["parameters"]["x"] == 1
 
+    def test_config_json_fallback(self, loader):
+        source = loader.plugin_source_path("p5")
+        source.mkdir(parents=True)
+        (source / "config.json").write_text('{"parameters": {"x": 2}}')
+        cfg = loader.load_plugin_config("p5")
+        assert cfg["parameters"]["x"] == 2
+
 
 class TestInstallRequirements:
     def _make_plugin(self, loader, name, path="", add_req_in_path=False, add_req_in_root=False):
@@ -107,3 +115,42 @@ class TestValidateWithPath:
         (source / "plugin.py").write_text(code)
         result = loader.validate("vp2", path="src")
         assert result.ok
+
+
+class TestClonePathStaging:
+    def _make_repo(self, tmp_path: Path) -> str:
+        work = tmp_path / "work"
+        work.mkdir()
+        plugin_src = work / "nested" / "task"
+        plugin_src.mkdir(parents=True)
+        (plugin_src / "plugin.py").write_text(textwrap.dedent("""\
+        from iocmng import TaskBase
+
+        class MyTask(TaskBase):
+            def initialize(self): pass
+            def execute(self): pass
+            def cleanup(self): pass
+        """))
+        (plugin_src / "config.yaml").write_text(yaml.dump({"parameters": {"mode": "continuous"}}))
+        (work / "README.md").write_text("repo root\n")
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=work, check=True, capture_output=True)
+
+        bare = tmp_path / "bare.git"
+        subprocess.run(["git", "clone", "--bare", str(work), str(bare)], check=True, capture_output=True)
+        return f"file://{bare}"
+
+    def test_clone_keeps_only_requested_subdir(self, loader, tmp_path):
+        repo_url = self._make_repo(tmp_path)
+        ok, _ = loader.clone("staged", repo_url, branch="main", path="nested/task")
+        assert ok
+
+        plugin_root = loader.plugin_path("staged")
+        assert (plugin_root / "plugin.py").exists()
+        assert (plugin_root / "config.yaml").exists()
+        assert not (plugin_root / "nested").exists()
+        assert not (plugin_root / "README.md").exists()

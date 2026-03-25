@@ -8,17 +8,22 @@ Each plugin repository should contain (at the specified path):
 """
 
 import logging
+import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import yaml
 
 from iocmng.core.validator import PluginValidator, ValidationResult
 
 logger = logging.getLogger(__name__)
+
+PLUGIN_METADATA_FILE = ".iocmng-plugin.json"
+CONFIG_FILENAMES = ("config.yaml", "config.yml", "config.json")
 
 # Base directory where plugins are cloned
 PLUGINS_DIR = Path(os.environ.get("IOCMNG_PLUGINS_DIR", "/tmp/iocmng_plugins"))
@@ -50,6 +55,39 @@ class PluginLoader:
             return base / path
         return base
 
+    def plugin_metadata_path(self, name: str) -> Path:
+        """Return the metadata sidecar path for a named plugin."""
+        return self.plugin_path(name) / PLUGIN_METADATA_FILE
+
+    def write_plugin_metadata(self, name: str, metadata: Dict[str, Any]) -> None:
+        """Persist lightweight plugin metadata next to the staged plugin files."""
+        metadata_path = self.plugin_metadata_path(name)
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+    def read_plugin_metadata(self, name: str) -> Dict[str, Any]:
+        """Load the metadata sidecar for a named plugin if present."""
+        metadata_path = self.plugin_metadata_path(name)
+        if not metadata_path.exists():
+            return {}
+        try:
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to read plugin metadata for '%s': %s", name, exc)
+            return {}
+
+    def list_local_plugins(self) -> List[str]:
+        """Return plugin directory names present on disk."""
+        if not self.plugins_dir.exists():
+            return []
+        names: List[str] = []
+        for entry in sorted(self.plugins_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            if entry.name.startswith(".") or entry.name.startswith("__reload__"):
+                continue
+            names.append(entry.name)
+        return names
+
     def is_loaded(self, name: str) -> bool:
         return self.plugin_path(name).exists()
 
@@ -59,6 +97,7 @@ class PluginLoader:
         git_url: str,
         pat: Optional[str] = None,
         branch: str = "main",
+        path: str = "",
         force: bool = False,
     ) -> Tuple[bool, str]:
         """Clone a git repository for a plugin.
@@ -92,30 +131,55 @@ class PluginLoader:
             else:
                 logger.warning("PAT provided but URL is not HTTPS; ignoring PAT")
 
-        cmd = ["git", "clone", "--depth", "1", "-b", branch, clone_url, str(dest)]
+        clone_message = ""
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        with tempfile.TemporaryDirectory(prefix=f"iocmng-{name}-") as temp_dir:
+            temp_root = Path(temp_dir) / "repo"
+            cmd = ["git", "clone", "--depth", "1", "-b", branch, clone_url, str(temp_root)]
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                )
+                if result.returncode != 0:
+                    stderr = result.stderr.strip()
+                    return False, f"Git clone failed: {stderr}"
+            except subprocess.TimeoutExpired:
+                return False, "Git clone timed out after 120s"
+            except FileNotFoundError:
+                return False, "git executable not found"
+
+            selected_root = temp_root / path if path else temp_root
+            if not selected_root.exists() or not selected_root.is_dir():
+                return False, f"Path '{path}' not found in cloned repository"
+
+            requirements_in_selected_path = selected_root / "requirements.txt"
+            requirements_in_repo_root = temp_root / "requirements.txt"
+
+            if path:
+                shutil.move(str(selected_root), str(dest))
+            else:
+                shutil.move(str(temp_root), str(dest))
+
+            if not requirements_in_selected_path.exists() and requirements_in_repo_root.exists():
+                shutil.copy2(requirements_in_repo_root, dest / "requirements.txt")
+
+            self.write_plugin_metadata(
+                name,
+                {
+                    "name": name,
+                    "git_url": git_url,
+                    "branch": branch,
+                    "source_path": path,
+                },
             )
-            if result.returncode != 0:
-                # Clean up partial clone
-                if dest.exists():
-                    shutil.rmtree(dest)
-                stderr = result.stderr.strip()
-                return False, f"Git clone failed: {stderr}"
-        except subprocess.TimeoutExpired:
-            if dest.exists():
-                shutil.rmtree(dest)
-            return False, "Git clone timed out after 120s"
-        except FileNotFoundError:
-            return False, "git executable not found"
+            clone_message = f"Cloned {git_url} into {dest}"
 
-        return True, f"Cloned {git_url} into {dest}"
+        return True, clone_message
 
     def install_requirements(self, name: str, path: str = "") -> Tuple[bool, str]:
         """Install requirements.txt if present in the plugin source directory.
@@ -168,17 +232,22 @@ class PluginLoader:
             Parsed config dict, or empty dict if no config found.
         """
         source_dir = self.plugin_source_path(name, path)
-        config_file = source_dir / "config.yaml"
-        if not config_file.exists():
-            # Also try config.yml
-            config_file = source_dir / "config.yml"
-        if not config_file.exists():
+        config_file = None
+        for candidate in CONFIG_FILENAMES:
+            candidate_path = source_dir / candidate
+            if candidate_path.exists():
+                config_file = candidate_path
+                break
+        if config_file is None:
             logger.debug(f"No config.yaml found in {source_dir}")
             return {}
 
         try:
-            with open(config_file, "r") as f:
-                cfg = yaml.safe_load(f) or {}
+            if config_file.suffix == ".json":
+                cfg = json.loads(config_file.read_text(encoding="utf-8")) or {}
+            else:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
             logger.info(f"Loaded plugin config from {config_file}")
             return cfg
         except Exception as e:

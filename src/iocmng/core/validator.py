@@ -8,10 +8,13 @@ can be imported, and have all required methods implemented.
 import ast
 import importlib
 import inspect
+import json
 import logging
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple, Type
+
+import yaml
 
 from iocmng.base.task import TaskBase
 from iocmng.base.job import JobBase
@@ -39,6 +42,72 @@ class ValidationResult:
 
 class PluginValidator:
     """Validates that a Python module contains a valid iocmng task or job."""
+
+    CONFIG_FILENAMES = ("config.yaml", "config.yml", "config.json")
+    VALID_PV_TYPES = {"float", "int", "string", "bool"}
+
+    @staticmethod
+    def validate_config_path(directory: Path) -> ValidationResult:
+        """Validate optional plugin config file structure.
+
+        Supported formats: YAML and JSON. If no config file exists, validation
+        succeeds because runtime defaults are still allowed.
+        """
+        config_path = None
+        for candidate in PluginValidator.CONFIG_FILENAMES:
+            candidate_path = directory / candidate
+            if candidate_path.exists():
+                config_path = candidate_path
+                break
+
+        if config_path is None:
+            return ValidationResult(ok=True)
+
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+            if config_path.suffix == ".json":
+                config = json.loads(raw) or {}
+            else:
+                config = yaml.safe_load(raw) or {}
+        except Exception as exc:
+            return ValidationResult(ok=False, errors=[f"Config parse error in {config_path.name}: {exc}"])
+
+        if not isinstance(config, dict):
+            return ValidationResult(ok=False, errors=[f"Config file {config_path.name} must contain a mapping/object at the top level"])
+
+        errors: List[str] = []
+        prefix = config.get("prefix")
+        if prefix is not None and not isinstance(prefix, str):
+            errors.append("Config field 'prefix' must be a string")
+
+        parameters = config.get("parameters", {})
+        if parameters is not None and not isinstance(parameters, dict):
+            errors.append("Config field 'parameters' must be a mapping/object")
+
+        pvs = config.get("pvs", {})
+        if pvs is not None and not isinstance(pvs, dict):
+            errors.append("Config field 'pvs' must be a mapping/object")
+        elif isinstance(pvs, dict):
+            for section_name in ("inputs", "outputs"):
+                section = pvs.get(section_name, {})
+                if section is None:
+                    continue
+                if not isinstance(section, dict):
+                    errors.append(f"Config pvs.{section_name} must be a mapping/object")
+                    continue
+                for pv_name, pv_cfg in section.items():
+                    if not isinstance(pv_cfg, dict):
+                        errors.append(f"PV '{pv_name}' in pvs.{section_name} must be a mapping/object")
+                        continue
+                    pv_type = pv_cfg.get("type")
+                    if pv_type is not None and pv_type not in PluginValidator.VALID_PV_TYPES:
+                        errors.append(
+                            f"PV '{pv_name}' in pvs.{section_name} has invalid type '{pv_type}'"
+                        )
+
+        if errors:
+            return ValidationResult(ok=False, errors=errors)
+        return ValidationResult(ok=True)
 
     @staticmethod
     def validate_module_path(module_path: Path) -> ValidationResult:
@@ -154,6 +223,10 @@ class PluginValidator:
         """
         if not directory.is_dir():
             return ValidationResult(ok=False, errors=[f"Not a directory: {directory}"])
+
+        config_result = PluginValidator.validate_config_path(directory)
+        if not config_result.ok:
+            return config_result
 
         py_files = sorted(directory.glob("*.py"))
         if not py_files:

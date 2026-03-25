@@ -44,10 +44,12 @@ JOB_CODE = textwrap.dedent("""\
 
 TASK_CONFIG = {
     "parameters": {"mode": "continuous", "interval": 0.1, "threshold": 50.0},
+    "prefix": "MY_TASK",
     "pvs": {"outputs": {"VALUE": {"type": "float", "value": 0.0}}},
 }
 
 JOB_CONFIG = {
+    "prefix": "MY_JOB",
     "parameters": {"mode": "job"},
 }
 
@@ -227,6 +229,21 @@ class TestPluginsEndpoint:
         assert d["ok"] is True, d["message"]
         assert "my-task" in d["message"]
 
+    def test_add_task_stages_only_requested_path(self, tmp_path, task_repo):
+        app = create_app(plugins_dir=str(tmp_path / "plugins"))
+        client = TestClient(app)
+        r = client.post("/api/v1/plugins", json={
+            "name": "staged-task",
+            "git_url": task_repo,
+            "branch": "main",
+            "path": "task",
+        })
+        assert r.status_code == 200
+        plugin_root = tmp_path / "plugins" / "staged-task"
+        assert (plugin_root / "plugin.py").exists()
+        assert (plugin_root / "config.yaml").exists()
+        assert not (plugin_root / "task").exists()
+
     def test_add_task_then_list(self, client, task_repo):
         client.post("/api/v1/plugins", json={
             "name": "listed-task",
@@ -261,6 +278,39 @@ class TestPluginsEndpoint:
 
     def test_get_nonexistent_plugin(self, client):
         assert client.get("/api/v1/plugins/ghost").status_code == 404
+
+    def test_list_plugins_includes_discovered_on_disk_plugin(self, tmp_path, task_repo):
+        app = create_app(plugins_dir=str(tmp_path / "plugins"))
+        client = TestClient(app)
+
+        from iocmng.core.loader import PluginLoader
+
+        loader = PluginLoader(tmp_path / "plugins")
+        ok, _ = loader.clone("disk-task", task_repo, branch="main", path="task")
+        assert ok
+
+        r = client.get("/api/v1/plugins")
+        assert r.status_code == 200
+        plugins = r.json()["plugins"]
+        plugin = next((item for item in plugins if item["name"] == "disk-task"), None)
+        assert plugin is not None
+        assert plugin["status"] == "available"
+        assert plugin["plugin_type"] == "task"
+        assert plugin["start_parameters"]["mode"] == "continuous"
+
+    def test_get_discovered_plugin(self, tmp_path, task_repo):
+        app = create_app(plugins_dir=str(tmp_path / "plugins"))
+        client = TestClient(app)
+
+        from iocmng.core.loader import PluginLoader
+
+        loader = PluginLoader(tmp_path / "plugins")
+        ok, _ = loader.clone("disk-task", task_repo, branch="main", path="task")
+        assert ok
+
+        r = client.get("/api/v1/plugins/disk-task")
+        assert r.status_code == 200
+        assert r.json()["status"] == "available"
 
     def test_add_duplicate_rejected(self, client, task_repo):
         body = {"name": "dup", "git_url": task_repo, "branch": "main", "path": "task"}
@@ -381,7 +431,8 @@ class TestTasksAlias:
         assert d["auto_start"] is True
         assert d["auto_start_on_boot"] is True
         assert d["autostart_order"] == 5
-        assert d["pv_prefix"]
+        assert d["pv_prefix"] == "BEAMLINE:DEFAULT:MY_TASK"
+        assert d["plugin_prefix"] == "MY_TASK"
         assert d["mode"] == "continuous"
         assert d["start_parameters"]["threshold"] == 77.0
         assert "ENABLE" in d["base_control_pvs"]
@@ -527,6 +578,8 @@ class TestJobsAlias:
         d = r.json()
         assert d["name"] == "startup-job"
         assert d["plugin_type"] == "job"
+        assert d["pv_prefix"] == "BEAMLINE:DEFAULT:MY_JOB"
+        assert d["plugin_prefix"] == "MY_JOB"
         assert d["mode"] is None
         assert "STATUS" in d["base_control_pvs"]
         assert "MESSAGE" in d["base_control_pvs"]

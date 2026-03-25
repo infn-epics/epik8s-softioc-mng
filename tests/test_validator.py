@@ -107,3 +107,18 @@ class TestPluginValidator:
         result = PluginValidator.validate_directory(tmp_path)
         assert result.ok
         assert result.class_name == "DirTask"
+
+    def test_invalid_json_config(self, tmp_path):
+        code = textwrap.dedent("""\
+        from iocmng import TaskBase
+
+        class DirTask(TaskBase):
+            def initialize(self): pass
+            def execute(self): pass
+            def cleanup(self): pass
+        """)
+        (tmp_path / "plugin.py").write_text(code)
+        (tmp_path / "config.json").write_text('{"parameters": ')  # malformed
+        result = PluginValidator.validate_directory(tmp_path)
+        assert not result.ok
+        assert any("Config parse error" in error for error in result.errors)

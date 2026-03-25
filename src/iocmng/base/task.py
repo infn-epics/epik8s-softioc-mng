@@ -53,6 +53,7 @@ class TaskBase(ABC):
         beamline_config: Optional[Dict[str, Any]] = None,
         ophyd_devices: Optional[Dict[str, object]] = None,
         prefix: Optional[str] = None,
+        plugin_prefix: Optional[str] = None,
         device_resolver: Optional[Any] = None,
     ):
         """Initialize a task.
@@ -63,7 +64,8 @@ class TaskBase(ABC):
             pv_definitions: PV definitions (inputs/outputs) for soft IOC integration.
             beamline_config: Full beamline configuration dict.
             ophyd_devices: Dictionary of Ophyd device instances.
-            prefix: PV prefix (overrides beamline_config).
+            prefix: Controller/beamline PV prefix.
+            plugin_prefix: Optional task-specific PV prefix segment from config.yaml.
             device_resolver: Optional callable(name) -> device for lazy creation.
         """
         self.name = name
@@ -83,6 +85,7 @@ class TaskBase(ABC):
         self.task_lock = threading.Lock()
 
         # PV prefix
+        self.plugin_prefix = plugin_prefix or self.name.upper()
         self.pv_prefix = self._get_pv_prefix(prefix)
 
         # Task mode: 'continuous' (default) or 'triggered'
@@ -100,10 +103,10 @@ class TaskBase(ABC):
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
         if controller_prefix:
-            return f"{controller_prefix}:{self.name.upper()}"
+            return f"{controller_prefix}:{self.plugin_prefix}"
         beamline = self.beamline_config.get("beamline", "BEAMLINE")
         namespace = self.beamline_config.get("namespace", "DEFAULT")
-        return f"{beamline.upper()}:{namespace.upper()}:{self.name.upper()}"
+        return f"{beamline.upper()}:{namespace.upper()}:{self.plugin_prefix}"
 
     # ------------------------------------------------------------------
     # Soft IOC PV integration

@@ -87,6 +87,7 @@ class PluginStartupInfoResponse(BaseModel):
     auto_start_on_boot: bool
     autostart_order: Optional[int] = None
     pv_prefix: Optional[str] = None
+    plugin_prefix: Optional[str] = None
     mode: Optional[str] = None
     start_parameters: Dict[str, Any]
     pv_definitions: Dict[str, Any]

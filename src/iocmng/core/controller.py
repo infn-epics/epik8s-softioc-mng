@@ -319,6 +319,12 @@ class IocMngController:
         if not self._softioc_enabled:
             return True, "softIOC disabled"
 
+        try:
+            from softioc import builder, softioc
+        except ImportError:
+            logger.info("softIOC not installed; skipping PV publication for plugin '%s'", info.name)
+            return True, "softIOC unavailable"
+
         instance = info.instance
         if instance is None or not hasattr(instance, "build_pvs"):
             return True, "No PV builder for this plugin"
@@ -329,8 +335,6 @@ class IocMngController:
             return False, f"PV build failed: {e}"
 
         try:
-            from softioc import builder, softioc
-
             # Load records generated so far. For the first plugin we also
             # initialize the IOC runtime.
             builder.LoadDatabase()

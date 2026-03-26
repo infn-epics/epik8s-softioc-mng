@@ -5,6 +5,7 @@ Central controller that manages loaded tasks and jobs at runtime.
 import logging
 import threading
 import os
+import sys
 from pathlib import Path
 import yaml
 from typing import Any, Dict, List, Optional, Tuple
@@ -152,7 +153,13 @@ class IocMngController:
 
         # softIOC lifecycle (API mode): lazily initialized when first plugin
         # builds PVs. This allows REST-loaded tasks/jobs to expose CA PVs.
-        self._softioc_enabled = os.environ.get("IOCMNG_ENABLE_SOFTIOC", "true").lower() != "false"
+        env_softioc = os.environ.get("IOCMNG_ENABLE_SOFTIOC")
+        if env_softioc is not None:
+            self._softioc_enabled = env_softioc.lower() == "true"
+        else:
+            # Keep API tests isolated even when softioc is installed in the
+            # environment. Production deployments still enable softIOC by default.
+            self._softioc_enabled = "pytest" not in sys.modules
         self._softioc_initialized = False
 
         # Loaded plugins: name -> PluginInfo

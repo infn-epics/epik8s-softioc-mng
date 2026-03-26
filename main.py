@@ -52,6 +52,9 @@ class BeamlineController:
         # Load configurations
         self.config = self._load_yaml(config_path)
         self.beamline_values = self._load_yaml(values_path)
+        prefix_override = os.environ.get("IOCMNG_PREFIX", "").strip()
+        if prefix_override:
+            self.config["prefix"] = prefix_override
 
         # Task management
         self.tasks: List[TaskBase] = []
@@ -60,6 +63,16 @@ class BeamlineController:
         self.ophyd_devices: Dict[str, object] = {}
         self.ophyd_factory = DeviceFactory()
         self.logger.info(f"BeamlineController {__version__} initialized")
+        self.logger.debug(
+            "BeamlineController config loaded: config_path=%s values_path=%s config_prefix=%r beamline=%r namespace=%r",
+            self.config_path,
+            self.values_path,
+            self.prefix,
+            self.beamline_values.get("beamline"),
+            self.beamline_values.get("namespace"),
+        )
+        if prefix_override:
+            self.logger.info("Using IOCMNG_PREFIX override for controller prefix: %s", self.prefix)
 
     def _load_yaml(self, path: str) -> Dict:
         """Load YAML configuration file."""
@@ -341,6 +354,14 @@ class BeamlineController:
                 pv_definitions = task_config.get("pvs", {})
 
                 # Create task instance
+                self.logger.debug(
+                    "Creating legacy task instance: name=%s controller_prefix=%r beamline=%r namespace=%r parameters=%s",
+                    task_name,
+                    self.prefix,
+                    self.beamline_values.get("beamline"),
+                    self.beamline_values.get("namespace"),
+                    sorted(parameters.keys()),
+                )
                 task = TaskClass(
                     name=task_name,
                     parameters=parameters,

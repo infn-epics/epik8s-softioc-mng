@@ -54,6 +54,14 @@ class TaskBase(ABC):
 
         # Get PV prefix from controller or beamline config
         self.pv_prefix = self._get_pv_prefix(prefix)
+        self.logger.debug(
+            "Legacy task prefix resolution: name=%s controller_prefix=%r beamline=%r namespace=%r resolved_pv_prefix=%r",
+            self.name,
+            prefix,
+            self.beamline_config.get("beamline"),
+            self.beamline_config.get("namespace"),
+            self.pv_prefix,
+        )
 
         # Task mode: 'continuous' (default) or 'triggered'
         mode = parameters.get("mode") or (
@@ -83,9 +91,11 @@ class TaskBase(ABC):
             return f"{controller_prefix}:{self.name.upper()}"
 
         # Fallback to extracting from beamline config
-        beamline = self.beamline_config.get("beamline", "BEAMLINE")
-        namespace = self.beamline_config.get("namespace", "DEFAULT")
-        return f"{beamline.upper()}:{namespace.upper()}:{self.name.upper()}"
+        beamline = self.beamline_config.get("beamline", "BEAMLINE").upper()
+        namespace = self.beamline_config.get("namespace", "DEFAULT").upper()
+        if beamline == namespace:
+            return f"{beamline}:{self.name.upper()}"
+        return f"{beamline}:{namespace}:{self.name.upper()}"
 
     def _create_pvs(self):
         """Create PVs using softioc builder."""

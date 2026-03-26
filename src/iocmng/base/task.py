@@ -87,6 +87,15 @@ class TaskBase(ABC):
         # PV prefix
         self.plugin_prefix = plugin_prefix or self.name.upper()
         self.pv_prefix = self._get_pv_prefix(prefix)
+        self.logger.debug(
+            "Task prefix resolution: name=%s controller_prefix=%r plugin_prefix=%r beamline=%r namespace=%r resolved_pv_prefix=%r",
+            self.name,
+            prefix,
+            self.plugin_prefix,
+            self.beamline_config.get("beamline"),
+            self.beamline_config.get("namespace"),
+            self.pv_prefix,
+        )
 
         # Task mode: 'continuous' (default) or 'triggered'
         mode = self.parameters.get("mode") or (
@@ -104,9 +113,11 @@ class TaskBase(ABC):
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
         if controller_prefix:
             return f"{controller_prefix}:{self.plugin_prefix}"
-        beamline = self.beamline_config.get("beamline", "BEAMLINE")
-        namespace = self.beamline_config.get("namespace", "DEFAULT")
-        return f"{beamline.upper()}:{namespace.upper()}:{self.plugin_prefix}"
+        beamline = self.beamline_config.get("beamline", "BEAMLINE").upper()
+        namespace = self.beamline_config.get("namespace", "DEFAULT").upper()
+        if beamline == namespace:
+            return f"{beamline}:{self.plugin_prefix}"
+        return f"{beamline}:{namespace}:{self.plugin_prefix}"
 
     # ------------------------------------------------------------------
     # Soft IOC PV integration

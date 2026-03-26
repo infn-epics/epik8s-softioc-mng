@@ -39,7 +39,7 @@ pip install iocmng[all]
 iocmng-server
 
 # Or with environment variables
-IOCMNG_PORT=8080 IOCMNG_LOG_LEVEL=debug iocmng-server
+IOCMNG_PORT=8080 IOCMNG_LOG_LEVEL=debug IOCMNG_PREFIX=SPARC:CONTROL iocmng-server
 
 # Or with Docker
 docker run -p 8080:8080 ghcr.io/infn-epics/epik8s-beamline-controller:latest
@@ -412,6 +412,7 @@ Startup behavior details:
 | `IOCMNG_BEAMLINE_CONFIG` | (none) | Path to values.yaml |
 | `IOCMNG_PLUGINS_CONFIG` | (none) | Path to initial plugins YAML |
 | `IOCMNG_PLUGINS_DIR` | `/data/plugins` | Directory for cloned plugins |
+| `IOCMNG_PREFIX` | (none) | Override the controller PV prefix from config.yaml |
 | `IOCMNG_HOST` | `0.0.0.0` | Server bind address |
 | `IOCMNG_PORT` | `8080` | Server port |
 | `IOCMNG_DISABLE_OPHYD` | `true` | Skip ophyd initialization |

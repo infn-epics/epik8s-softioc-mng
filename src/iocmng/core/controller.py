@@ -157,6 +157,14 @@ class IocMngController:
         self.ophyd_devices: Dict[str, object] = {}
         self._device_index: Dict[str, Dict[str, Any]] = {}
         self._device_factory = None
+        logger.debug(
+            "IocMngController initialized: config_prefix=%r beamline=%r namespace=%r disable_ophyd=%r plugins_dir=%r",
+            self.config.get("prefix"),
+            self.beamline_config.get("beamline"),
+            self.beamline_config.get("namespace"),
+            self.disable_ophyd,
+            str(self._plugins_dir),
+        )
         if not disable_ophyd and beamline_config:
             self._build_device_index()
 
@@ -368,6 +376,15 @@ class IocMngController:
 
         # 6. Instantiate
         try:
+            logger.debug(
+                "Instantiating plugin: name=%s type=%s controller_prefix=%r plugin_prefix=%r beamline=%r namespace=%r",
+                name,
+                load_result.plugin_type,
+                self.config.get("prefix"),
+                plugin_prefix,
+                self.beamline_config.get("beamline"),
+                self.beamline_config.get("namespace"),
+            )
             instance = cls(
                 name=name,
                 parameters=merged_params,
@@ -693,6 +710,15 @@ class IocMngController:
 
         # 8. Re-instantiate
         try:
+            logger.debug(
+                "Re-instantiating plugin: name=%s type=%s controller_prefix=%r plugin_prefix=%r beamline=%r namespace=%r",
+                name,
+                load_result.plugin_type,
+                self.config.get("prefix"),
+                plugin_prefix,
+                self.beamline_config.get("beamline"),
+                self.beamline_config.get("namespace"),
+            )
             instance = cls(
                 name=name,
                 parameters=merged_params,

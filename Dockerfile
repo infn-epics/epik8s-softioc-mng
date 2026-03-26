@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir ".[all]"
 # Default plugin directory (writable by non-root users)
 RUN mkdir -p /data/plugins && chmod 777 /data/plugins
 ENV IOCMNG_PLUGINS_DIR=/data/plugins
+ENV IOCMNG_PREFIX=
 ENV IOCMNG_HOST=0.0.0.0
 ENV IOCMNG_PORT=8080
 ENV IOCMNG_DISABLE_OPHYD=false

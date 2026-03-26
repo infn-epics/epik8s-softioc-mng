@@ -28,6 +28,7 @@ def create_app(
     plugins_dir: Optional[str] = None,
     plugins_config_path: Optional[str] = None,
     disable_ophyd: bool = False,
+    prefix_override: Optional[str] = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -40,6 +41,7 @@ def create_app(
             contain: ``name``, ``git_url``, ``path``, ``branch``, ``pat``,
             ``auto_start``, ``parameters``.
         disable_ophyd: Skip ophyd initialization (default False for API mode).
+        prefix_override: Optional controller PV prefix override.
 
     Returns:
         Configured FastAPI instance.
@@ -47,6 +49,9 @@ def create_app(
     config = _load_yaml(config_path) if config_path else {}
     beamline_config = _load_yaml(beamline_path) if beamline_path else {}
     initial_plugins = _load_yaml(plugins_config_path).get("plugins", []) if plugins_config_path else []
+    if prefix_override:
+        config["prefix"] = prefix_override
+        logging.info("Using IOCMNG_PREFIX override for controller prefix: %s", prefix_override)
 
     p_dir = Path(plugins_dir) if plugins_dir else None
     controller = IocMngController(
@@ -112,6 +117,7 @@ def run_server():
     beamline_path = os.environ.get("IOCMNG_BEAMLINE_CONFIG", None)
     plugins_dir = os.environ.get("IOCMNG_PLUGINS_DIR", "/data/plugins")
     plugins_config_path = os.environ.get("IOCMNG_PLUGINS_CONFIG", None)
+    prefix_override = os.environ.get("IOCMNG_PREFIX", "").strip() or None
     host = os.environ.get("IOCMNG_HOST", "0.0.0.0")
     port = int(os.environ.get("IOCMNG_PORT", "8080"))
     disable_ophyd = os.environ.get("IOCMNG_DISABLE_OPHYD", "false").lower() == "true"
@@ -135,5 +141,6 @@ def run_server():
         plugins_dir=plugins_dir,
         plugins_config_path=plugins_config_path,
         disable_ophyd=disable_ophyd,
+        prefix_override=prefix_override,
     )
     uvicorn.run(app, host=host, port=port, log_level=log_level, log_config=None)

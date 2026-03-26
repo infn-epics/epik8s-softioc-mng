@@ -389,19 +389,33 @@ class IocMngController:
         Returns:
             Tuple of (success, message, validation_dict_or_None).
         """
+        created_on_disk = False
         with self._lock:
-            if name in self._plugins or self.loader.is_loaded(name):
+            if name in self._plugins:
                 return False, f"Plugin '{name}' already exists", None
 
-        # 1. Clone (force=True removes any stale directory from a previous failed attempt)
-        ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch, path=path, force=True)
-        if not ok:
-            return False, msg, None
+        staged_metadata = self.loader.read_plugin_metadata(name) if self.loader.is_loaded(name) else {}
+        staged_plugin_exists = self.loader.is_loaded(name)
+
+        if staged_plugin_exists:
+            git_url = git_url or staged_metadata.get("git_url", "")
+            branch = branch or staged_metadata.get("branch", "main")
+            path = path or staged_metadata.get("source_path", "")
+        elif not git_url:
+            return False, f"Plugin '{name}' is not staged locally and no git_url was provided", None
+
+        # 1. Clone if the plugin is not already staged locally.
+        if not staged_plugin_exists:
+            ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch, path=path, force=True)
+            if not ok:
+                return False, msg, None
+            created_on_disk = True
 
         # 2. Install requirements
         ok, msg = self.loader.install_requirements(name)
         if not ok:
-            self.loader.remove(name)
+            if created_on_disk:
+                self.loader.remove(name)
             return False, f"Dependency installation failed: {msg}", None
 
         # 3. Load per-plugin config.yaml
@@ -415,13 +429,15 @@ class IocMngController:
         # 4. Validate
         validation = self.loader.validate(name)
         if not validation.ok:
-            self.loader.remove(name)
+            if created_on_disk:
+                self.loader.remove(name)
             return False, "Validation failed", validation.to_dict()
 
         # 5. Load class
         cls, load_result = self.loader.load_class(name)
         if cls is None:
-            self.loader.remove(name)
+            if created_on_disk:
+                self.loader.remove(name)
             return False, "Failed to load class", load_result.to_dict()
 
         # 6. Instantiate
@@ -446,7 +462,8 @@ class IocMngController:
                 device_resolver=self.get_device,
             )
         except Exception as e:
-            self.loader.remove(name)
+            if created_on_disk:
+                self.loader.remove(name)
             return False, f"Instantiation failed: {e}", validation.to_dict()
 
         info = PluginInfo(
@@ -471,7 +488,8 @@ class IocMngController:
         # Build PVs and ensure softIOC is initialized before starting tasks.
         ok, pv_msg = self._build_and_init_plugin_pvs(info)
         if not ok:
-            self.loader.remove(name)
+            if created_on_disk:
+                self.loader.remove(name)
             return False, pv_msg, validation.to_dict()
 
         with self._lock:

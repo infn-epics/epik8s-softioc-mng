@@ -4,6 +4,7 @@ Central controller that manages loaded tasks and jobs at runtime.
 
 import logging
 import threading
+import os
 from pathlib import Path
 import yaml
 from typing import Any, Dict, List, Optional, Tuple
@@ -148,6 +149,11 @@ class IocMngController:
         self._plugins_dir = Path(plugins_dir) if plugins_dir else self.loader.plugins_dir
         self._autostart_registry_path = self._plugins_dir / "autostart_plugins.yaml"
         self._lock = threading.Lock()
+
+        # softIOC lifecycle (API mode): lazily initialized when first plugin
+        # builds PVs. This allows REST-loaded tasks/jobs to expose CA PVs.
+        self._softioc_enabled = os.environ.get("IOCMNG_ENABLE_SOFTIOC", "true").lower() != "false"
+        self._softioc_initialized = False
 
         # Loaded plugins: name -> PluginInfo
         self._plugins: Dict[str, PluginInfo] = {}
@@ -304,6 +310,39 @@ class IocMngController:
     # Plugin management
     # ------------------------------------------------------------------
 
+    def _build_and_init_plugin_pvs(self, info: PluginInfo) -> Tuple[bool, str]:
+        """Build plugin PV records and initialize softIOC if needed.
+
+        In API mode plugins are loaded dynamically, so we must create records
+        at plugin load time (not only in legacy main.py startup flow).
+        """
+        if not self._softioc_enabled:
+            return True, "softIOC disabled"
+
+        instance = info.instance
+        if instance is None or not hasattr(instance, "build_pvs"):
+            return True, "No PV builder for this plugin"
+
+        try:
+            instance.build_pvs()
+        except Exception as e:
+            return False, f"PV build failed: {e}"
+
+        try:
+            from softioc import builder, softioc
+
+            # Load records generated so far. For the first plugin we also
+            # initialize the IOC runtime.
+            builder.LoadDatabase()
+            if not self._softioc_initialized:
+                softioc.iocInit()
+                self._softioc_initialized = True
+                logger.info("softIOC initialized in API mode")
+        except Exception as e:
+            return False, f"softIOC initialization failed: {e}"
+
+        return True, "PVs built"
+
     def add_plugin(
         self,
         name: str,
@@ -417,6 +456,12 @@ class IocMngController:
             status="loaded",
         )
         info.instance = instance
+
+        # Build PVs and ensure softIOC is initialized before starting tasks.
+        ok, pv_msg = self._build_and_init_plugin_pvs(info)
+        if not ok:
+            self.loader.remove(name)
+            return False, pv_msg, validation.to_dict()
 
         with self._lock:
             self._plugins[name] = info

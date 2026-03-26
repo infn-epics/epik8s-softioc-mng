@@ -248,7 +248,7 @@ class PluginLoader:
             else:
                 with open(config_file, "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f) or {}
-            logger.info(f"Loaded plugin config from {config_file}")
+            logger.debug(f"Loaded plugin config from {config_file}")
             return cfg
         except Exception as e:
             logger.warning(f"Failed to load config.yaml: {e}")

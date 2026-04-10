@@ -154,6 +154,10 @@ class PluginValidator:
             if module_name in sys.modules:
                 del sys.modules[module_name]
             module = importlib.import_module(module_name)
+        except SystemExit as e:
+            if added_to_path:
+                sys.path.remove(parent_dir)
+            return ValidationResult(ok=False, errors=[f"Import error: module calls sys.exit({e.code}) at import time"])
         except Exception as e:
             if added_to_path:
                 sys.path.remove(parent_dir)

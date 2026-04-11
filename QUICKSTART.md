@@ -42,97 +42,142 @@
 
 ## Creating Your First Task
 
-### 1. Create task file: `tasks/my_first_task.py`
+### 1. Create task file: `my_first_task.py`
 
 ```python
-import cothread
-from task_base import TaskBase
+from iocmng import TaskBase, pv_client
 
 class MyFirstTask(TaskBase):
     def initialize(self):
         self.logger.info("My first task starting!")
         self.counter = 0
-    
-    def run(self):
-        while self.running:
-            if self.get_pv('ENABLE'):
-                # Read input
-                value = self.get_pv('INPUT') or 0.0
-                
-                # Process
-                result = value * 2.0
-                self.counter += 1
-                
-                # Write outputs
-                self.set_pv('OUTPUT', result)
-                self.set_pv('COUNTER', self.counter)
-            
-            cothread.Sleep(1.0)
-    
+
+    def execute(self):
+        if self.get_pv('ENABLE'):
+            value = self.get_pv('INPUT') or 0.0
+            result = value * 2.0
+            self.counter += 1
+            self.set_pv('OUTPUT', result)
+            self.set_pv('COUNTER', self.counter)
+
     def cleanup(self):
         self.logger.info(f"Task stopped after {self.counter} cycles")
-    
+
     def handle_pv_write(self, pv_name, value):
         if pv_name == 'INPUT':
             self.logger.info(f"Input changed to {value}")
 ```
 
-### 2. Add to `config.yaml`:
+### 2. Create `config.yaml` alongside the task:
 
 ```yaml
-tasks:
-  - name: "my_task"
-    module: "my_first_task"
-    parameters:
-      # Add any parameters your task needs
-    pvs:
-      inputs:
-        INPUT:
-          type: float
-          value: 0.0
-          unit: "V"
-          prec: 2
-      outputs:
-        OUTPUT:
-          type: float
-          value: 0.0
-          unit: "V"
-          prec: 2
-        COUNTER:
-          type: int
-          value: 0
+parameters:
+  mode: continuous
+  interval: 1.0
+arguments:
+  inputs:
+    INPUT:
+      type: float
+      value: 0.0
+  outputs:
+    OUTPUT:
+      type: float
+      value: 0.0
+    COUNTER:
+      type: int
+      value: 0
 ```
 
-### 3. Run and test:
+### 3. Run standalone (no REST server needed):
 
 ```bash
-python main.py
+iocmng-run --module my_first_task --class-name MyFirstTask \
+           --config config.yaml --prefix MY:IOC --name my-task
 
 # In another terminal
-caput SPARC:SPARC:MY_TASK:INPUT 5.0
-caget SPARC:SPARC:MY_TASK:OUTPUT
-caget SPARC:SPARC:MY_TASK:COUNTER
+caput MY:IOC:MY-TASK:INPUT 5.0
+caget MY:IOC:MY-TASK:OUTPUT
+caget MY:IOC:MY-TASK:COUNTER
 ```
 
 ## Tips for Development
 
-### Using External PVs
+### Reading/Writing External PVs
 
-If your task needs to read/write PVs from other IOCs:
+Use `pv_client` — it respects the CA/PVA transport chosen at startup:
 
 ```python
-from epics import caget, caput
+from iocmng import TaskBase, pv_client
 
-def run(self):
-    while self.running:
-        # Read from external IOC
-        external_value = caget("OTHER:IOC:PV:NAME")
-        
-        # Write to external IOC
-        caput("OTHER:IOC:COMMAND", 1)
-        
-        cothread.Sleep(1.0)
+class MyTask(TaskBase):
+    def execute(self):
+        # Read from another IOC
+        value = pv_client.get("OTHER:IOC:PV", timeout=2.0)
+
+        # Write to another IOC
+        pv_client.put("OTHER:IOC:CMD", 1, timeout=2.0)
 ```
+
+### Using Ophyd Devices (motors, I/O, power supplies)
+
+`create_device()` instantiates any device registered in `infn_ophyd_hal`
+by PV prefix, group and type. The result is cached so subsequent calls
+return the same instance.
+
+```python
+from iocmng import TaskBase
+
+class MyMotorTask(TaskBase):
+    def initialize(self):
+        # Standard EPICS asyn motor record
+        self.motor = self.create_device(
+            prefix="BEAMLINE:MOT:AXIS01",
+            devgroup="mot",
+            devtype="asyn",   # uses OphydAsynMotor (EpicsMotor)
+            name="AXIS01",
+        )
+        # TechnoSoft / TML proprietary motor record
+        self.tml = self.create_device(
+            prefix="SPARC:MOT:TML:GUNFLG01",
+            devgroup="mot",
+            devtype="tml",    # uses OphydTmlMotor
+            name="GUNFLG01",
+        )
+        # Digital output
+        self.shutter = self.create_device(
+            prefix="SPARC:SHT:ICP:CATLAS01",
+            devgroup="io",
+            devtype="do",
+            name="CATLAS01",
+        )
+
+    def execute(self):
+        if self.motor is None:
+            return
+        pos = self.motor.user_readback.get()
+        done = self.motor.motor_done_move.get()
+        self.set_pv("POSITION", pos)
+        self.set_pv("MOVING", int(not done))
+```
+
+Supported `(devgroup, devtype)` pairs:
+
+| devgroup | devtype | Ophyd class |
+|----------|---------|-------------|
+| `mot` | `asyn` | `OphydAsynMotor` (`.VAL`/`.RBV`/`.DMOV`) |
+| `mot` | `tml` | `OphydTmlMotor` (TechnoSoft/TML record) |
+| `mot` | `sim` | `OphydMotorSim` (in-memory, no EPICS) |
+| `io` | `di`/`do` | `OphydDI`/`OphydDO` |
+| `io` | `ai`/`ao` | `OphydAI`/`OphydAO` |
+| `io` | `rtd` | `OphydRTD` |
+| `mag` | `dante` | `OphydPSDante` |
+| `mag` | `unimag` | `OphydPSUnimag` |
+| `diag` | `bpm` | `SppOphydBpm` |
+| `vac` | `ipcmini` | `OphydVPC` |
+
+> **Note:** `ophyd` and `infn_ophyd_hal` must be installed
+> (`pip install iocmng[ophyd]`). If not available `create_device()` returns
+> `None` — always guard with `if self.motor is None`.
 
 ### Averaging and Buffering
 
@@ -141,21 +186,13 @@ def initialize(self):
     self.buffer = []
     self.buffer_size = self.parameters.get('buffer_size', 10)
 
-def run(self):
-    while self.running:
-        value = self.get_pv('INPUT')
-        
-        # Add to buffer
-        self.buffer.append(value)
-        if len(self.buffer) > self.buffer_size:
-            self.buffer.pop(0)
-        
-        # Calculate average
-        import numpy as np
-        avg = np.mean(self.buffer)
-        self.set_pv('AVERAGE', avg)
-        
-        cothread.Sleep(0.1)
+def execute(self):
+    value = self.get_pv('INPUT') or 0.0
+    self.buffer.append(value)
+    if len(self.buffer) > self.buffer_size:
+        self.buffer.pop(0)
+    avg = sum(self.buffer) / len(self.buffer)
+    self.set_pv('AVERAGE', avg)
 ```
 
 ### Implementing Interlocks

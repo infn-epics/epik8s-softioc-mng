@@ -14,7 +14,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-RUN pip install --no-cache-dir ".[all]"
+RUN pip install --no-cache-dir ".[all]" jnjrender
 
 # Default plugin directory (writable by non-root users)
 RUN mkdir -p /data/plugins && chmod 777 /data/plugins

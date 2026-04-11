@@ -349,6 +349,109 @@ class TaskBase(ABC):
             return self._device_resolver(device_name)
         return self.ophyd_devices.get(device_name)
 
+    def create_device(
+        self,
+        prefix: str,
+        devgroup: str,
+        devtype: str,
+        name: Optional[str] = None,
+        cache: bool = True,
+    ):
+        """Instantiate an Ophyd device by PV prefix, group and type.
+
+        Uses the same ``DeviceFactory`` registry as the beamline controller so
+        device classes, PV component suffixes and metadata are consistent.
+
+        Supported ``(devgroup, devtype)`` pairs (non-exhaustive):
+
+        +-----------+-------------------+------------------------------------------+
+        | devgroup  | devtype           | Ophyd class                              |
+        +===========+===================+==========================================+
+        | ``mot``   | ``asyn``          | ``OphydAsynMotor`` (EPICS motor record)  |
+        | ``mot``   | ``tml``           | ``OphydTmlMotor`` (TechnoSoft / TML)     |
+        | ``mot``   | ``sim``           | ``OphydMotorSim``                        |
+        | ``io``    | ``di``/``do``     | ``OphydDI`` / ``OphydDO``               |
+        | ``io``    | ``ai``/``ao``     | ``OphydAI`` / ``OphydAO``               |
+        | ``io``    | ``rtd``           | ``OphydRTD``                             |
+        | ``mag``   | ``dante``         | ``OphydPSDante``                         |
+        | ``mag``   | ``unimag``        | ``OphydPSUnimag``                        |
+        | ``diag``  | ``bpm``           | ``SppOphydBpm``                          |
+        | ``vac``   | ``ipcmini``       | ``OphydVPC``                             |
+        +-----------+-------------------+------------------------------------------+
+
+        Example — TML motor using SPARC:MOT:TML prefix::
+
+            motor = self.create_device(
+                prefix="SPARC:MOT:TML:GUNFLG01",
+                devgroup="mot",
+                devtype="tml",
+                name="GUNFLG01",
+            )
+            pos = motor.user_readback.get()
+
+        Example — standard asyn motor record::
+
+            motor = self.create_device(
+                prefix="SPARC:MOT:TML:GUNFLG01",
+                devgroup="mot",
+                devtype="asyn",
+                name="GUNFLG01",
+            )
+            is_done = motor.motor_done_move.get()
+
+        Args:
+            prefix: Full PV prefix for the device (e.g. ``"SPARC:MOT:TML:GUNFLG01"``).
+            devgroup: Device group key (``"mot"``, ``"io"``, ``"mag"``, ``"diag"``, ``"vac"``).
+            devtype: Device type key (``"asyn"``, ``"tml"``, ``"di"``, ``"dante"`` …).
+            name: Ophyd device ``name`` attribute.  Defaults to the last segment of *prefix*.
+            cache: If *True* (default) the device is stored in ``self.ophyd_devices``
+                under ``name`` and returned on subsequent calls without re-creating it.
+
+        Returns:
+            Ophyd device instance, or *None* if ophyd/infn_ophyd_hal are not available.
+        """
+        device_name = name or prefix.rsplit(":", 1)[-1]
+
+        if cache and device_name in self.ophyd_devices:
+            return self.ophyd_devices[device_name]
+
+        try:
+            from infn_ophyd_hal.device_factory import DeviceFactory
+        except ImportError:
+            self.logger.warning(
+                "create_device: ophyd / infn_ophyd_hal not installed — returning None"
+            )
+            return None
+
+        factory = DeviceFactory()
+        device = factory.create_device(
+            devgroup=devgroup,
+            devtype=devtype,
+            prefix=prefix,
+            name=device_name,
+        )
+        if device is None:
+            self.logger.warning(
+                "create_device: DeviceFactory returned None for %s/%s prefix=%s",
+                devgroup,
+                devtype,
+                prefix,
+            )
+            return None
+
+        if cache:
+            self.ophyd_devices[device_name] = device
+
+        self.logger.debug(
+            "create_device: %s/%s prefix=%s name=%s -> %s",
+            devgroup,
+            devtype,
+            prefix,
+            device_name,
+            type(device).__name__,
+        )
+        return device
+
     def list_devices(self):
         return list(self.ophyd_devices.keys())
 

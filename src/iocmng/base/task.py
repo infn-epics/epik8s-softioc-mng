@@ -456,6 +456,124 @@ class TaskBase(ABC):
         return list(self.ophyd_devices.keys())
 
     # ------------------------------------------------------------------
+    # ChannelFinder integration
+    # ------------------------------------------------------------------
+
+    @property
+    def channelfinder(self):
+        """Lazy-initialised :class:`~iocmng.core.channelfinder.ChannelFinderClient`.
+
+        Activated when the task parameter ``channelfinder_url`` is set.
+        Returns *None* if the URL is not configured or ``requests`` is missing.
+        """
+        if hasattr(self, "_cf_client"):
+            return self._cf_client
+
+        cf_url = self.parameters.get("channelfinder_url")
+        if not cf_url:
+            self._cf_client = None
+            return None
+
+        try:
+            from iocmng.core.channelfinder import ChannelFinderClient
+            self._cf_client = ChannelFinderClient(
+                url=cf_url,
+                timeout=float(self.parameters.get("channelfinder_timeout", 10.0)),
+            )
+            self.logger.info("ChannelFinder client initialised: %s", cf_url)
+        except Exception as exc:
+            self.logger.warning("ChannelFinder unavailable: %s", exc)
+            self._cf_client = None
+        return self._cf_client
+
+    def cf_search(self, **kwargs):
+        """Search ChannelFinder channels.
+
+        Convenience wrapper around :meth:`ChannelFinderClient.search`.
+        Returns an empty list when ChannelFinder is not configured.
+
+        Keyword args are forwarded directly — common filters::
+
+            name      — PV name glob (e.g. ``"SPARC:MOT:TML:*"``)
+            devgroup  — ``"mot"``, ``"io"``, ``"mag"``, ``"diag"``, ``"vac"``
+            devtype   — ``"tml"``, ``"asyn"``, ``"di"`` …
+            zone      — accelerator zone
+            iocName   — IOC name as registered by cfeeder
+
+        Example::
+
+            channels = self.cf_search(devgroup="mot", name="SPARC:MOT:TML:*")
+        """
+        if self.channelfinder is None:
+            return []
+        try:
+            return self.channelfinder.search(**kwargs)
+        except Exception as exc:
+            self.logger.error("cf_search failed: %s", exc)
+            return []
+
+    def cf_discover_devices(self, **kwargs):
+        """Discover devices from ChannelFinder metadata.
+
+        Returns a list of device descriptors (dicts) grouped by PV stem.
+        Each dict contains ``name``, ``devgroup``, ``devtype``, ``prefix``,
+        ``iocname``, ``properties``, ``pvs``.
+
+        Keyword args are the same as :meth:`cf_search`.
+
+        Example::
+
+            motors = self.cf_discover_devices(devgroup="mot", devtype="tml")
+            for desc in motors:
+                dev = self.cf_create_device(desc)
+        """
+        if self.channelfinder is None:
+            return []
+        try:
+            return self.channelfinder.discover_devices(**kwargs)
+        except Exception as exc:
+            self.logger.error("cf_discover_devices failed: %s", exc)
+            return []
+
+    def cf_create_device(self, device_descriptor, cache: bool = True):
+        """Create an Ophyd device from a ChannelFinder device descriptor.
+
+        *device_descriptor* is a dict as returned by :meth:`cf_discover_devices`
+        (keys: ``name``, ``devgroup``, ``devtype``, ``prefix``).
+
+        Uses :meth:`create_device` internally, so the result is cached in
+        ``self.ophyd_devices`` by default.
+
+        Returns the Ophyd device instance, or *None* if creation fails.
+
+        Example::
+
+            descs = self.cf_discover_devices(devgroup="io", devtype="do")
+            for d in descs:
+                shutter = self.cf_create_device(d)
+                if shutter:
+                    shutter.write(0)
+        """
+        name = device_descriptor.get("name", "")
+        devgroup = device_descriptor.get("devgroup", "")
+        devtype = device_descriptor.get("devtype", "")
+        prefix = device_descriptor.get("prefix", "")
+
+        if not all([name, devgroup, devtype, prefix]):
+            self.logger.warning(
+                "cf_create_device: incomplete descriptor %s", device_descriptor
+            )
+            return None
+
+        return self.create_device(
+            prefix=prefix,
+            devgroup=devgroup,
+            devtype=devtype,
+            name=name,
+            cache=cache,
+        )
+
+    # ------------------------------------------------------------------
     # Abstract methods – subclasses MUST implement these
     # ------------------------------------------------------------------
 

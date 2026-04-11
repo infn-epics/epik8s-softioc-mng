@@ -43,8 +43,11 @@ ophyd = [
 kubernetes = [
     "kubernetes",
 ]
+channelfinder = [
+    "requests>=2.28.0",
+]
 all = [
-    "iocmng[server,ophyd,kubernetes]",
+    "iocmng[server,ophyd,kubernetes,channelfinder]",
 ]
 dev = [
     "iocmng[server]",

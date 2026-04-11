@@ -8,13 +8,14 @@ pyyaml>=6.0
 pydantic>=2.0
 
 # Optional: EPICS soft IOC support
-# softioc
-# cothread
+softioc
+cothread
 
 # Optional: Ophyd device abstraction
 # ophyd
-# infn_ophyd_hal
+infn_ophyd_hal
 
+p4p
 # Optional: Kubernetes integration
 # kubernetes
 

@@ -75,8 +75,13 @@ epicsConfiguration:
 ## Step 5: Run the Controller
 
 ```bash
-python main.py --config config.yaml --values values.yaml
+iocmng-server
+
+# or use the explicit standalone alias
+iocmng-standalone
 ```
+
+For standalone plugin loading, point `IOCMNG_PLUGINS_CONFIG` at a YAML file whose entries use either `git_url` or `local_path`.
 
 ## Troubleshooting
 

@@ -40,12 +40,12 @@ class TestLoadPluginConfig:
     def test_load_config(self, loader):
         expected = {
             "parameters": {"threshold": 10},
-            "pvs": {"outputs": {"VALUE": {"type": "float", "value": 0}}},
+            "arguments": {"outputs": {"VALUE": {"type": "float", "value": 0}}},
         }
         self._create_plugin(loader, "p2", config=expected)
         cfg = loader.load_plugin_config("p2")
         assert cfg["parameters"]["threshold"] == 10
-        assert "VALUE" in cfg["pvs"]["outputs"]
+        assert "VALUE" in cfg["arguments"]["outputs"]
 
     def test_load_config_with_path(self, loader):
         expected = {"parameters": {"mode": "triggered"}}
@@ -154,3 +154,29 @@ class TestClonePathStaging:
         assert (plugin_root / "config.yaml").exists()
         assert not (plugin_root / "nested").exists()
         assert not (plugin_root / "README.md").exists()
+
+
+class TestLocalPathStaging:
+    def test_stage_local_plugin_keeps_only_requested_subdir(self, loader, tmp_path):
+        work = tmp_path / "work"
+        plugin_src = work / "nested" / "task"
+        plugin_src.mkdir(parents=True)
+        (plugin_src / "plugin.py").write_text(textwrap.dedent("""\
+        from iocmng import TaskBase
+
+        class MyTask(TaskBase):
+            def initialize(self): pass
+            def execute(self): pass
+            def cleanup(self): pass
+        """))
+        (plugin_src / "config.yaml").write_text(yaml.dump({"arguments": {"outputs": {"VALUE": {"type": "float", "value": 0}}}}))
+        (work / "requirements.txt").write_text("# root empty\n")
+
+        ok, _ = loader.stage_local_plugin("local-staged", str(work), path="nested/task")
+        assert ok
+
+        plugin_root = loader.plugin_path("local-staged")
+        assert (plugin_root / "plugin.py").exists()
+        assert (plugin_root / "config.yaml").exists()
+        assert (plugin_root / "requirements.txt").exists()
+        assert not (plugin_root / "nested").exists()

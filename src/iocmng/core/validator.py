@@ -18,6 +18,7 @@ import yaml
 
 from iocmng.base.task import TaskBase
 from iocmng.base.job import JobBase
+from iocmng.core.plugin_spec import VALID_PV_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,33 @@ class PluginValidator:
     """Validates that a Python module contains a valid iocmng task or job."""
 
     CONFIG_FILENAMES = ("config.yaml", "config.yml", "config.json")
-    VALID_PV_TYPES = {"float", "int", "string", "bool"}
+
+    @staticmethod
+    def _validate_argument_sections(config_name: str, sections: object, errors: List[str]) -> None:
+        if sections is None:
+            return
+        if not isinstance(sections, dict):
+            errors.append(f"Config field '{config_name}' must be a mapping/object")
+            return
+
+        for section_name in ("inputs", "outputs"):
+            section = sections.get(section_name, {})
+            if section is None:
+                continue
+            if not isinstance(section, dict):
+                errors.append(f"Config {config_name}.{section_name} must be a mapping/object")
+                continue
+            for pv_name, pv_cfg in section.items():
+                if not isinstance(pv_cfg, dict):
+                    errors.append(
+                        f"PV '{pv_name}' in {config_name}.{section_name} must be a mapping/object"
+                    )
+                    continue
+                pv_type = pv_cfg.get("type")
+                if pv_type is not None and pv_type not in VALID_PV_TYPES:
+                    errors.append(
+                        f"PV '{pv_name}' in {config_name}.{section_name} has invalid type '{pv_type}'"
+                    )
 
     @staticmethod
     def validate_config_path(directory: Path) -> ValidationResult:
@@ -84,26 +111,8 @@ class PluginValidator:
         if parameters is not None and not isinstance(parameters, dict):
             errors.append("Config field 'parameters' must be a mapping/object")
 
-        pvs = config.get("pvs", {})
-        if pvs is not None and not isinstance(pvs, dict):
-            errors.append("Config field 'pvs' must be a mapping/object")
-        elif isinstance(pvs, dict):
-            for section_name in ("inputs", "outputs"):
-                section = pvs.get(section_name, {})
-                if section is None:
-                    continue
-                if not isinstance(section, dict):
-                    errors.append(f"Config pvs.{section_name} must be a mapping/object")
-                    continue
-                for pv_name, pv_cfg in section.items():
-                    if not isinstance(pv_cfg, dict):
-                        errors.append(f"PV '{pv_name}' in pvs.{section_name} must be a mapping/object")
-                        continue
-                    pv_type = pv_cfg.get("type")
-                    if pv_type is not None and pv_type not in PluginValidator.VALID_PV_TYPES:
-                        errors.append(
-                            f"PV '{pv_name}' in pvs.{section_name} has invalid type '{pv_type}'"
-                        )
+        PluginValidator._validate_argument_sections("arguments", config.get("arguments"), errors)
+        PluginValidator._validate_argument_sections("pvs", config.get("pvs"), errors)
 
         if errors:
             return ValidationResult(ok=False, errors=errors)

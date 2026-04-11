@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from iocmng.api.routes import router, set_controller
 from iocmng.core.controller import IocMngController
+from iocmng.core import pv_client
 
 
 def _load_yaml(path: str):
@@ -29,6 +30,7 @@ def create_app(
     plugins_config_path: Optional[str] = None,
     disable_ophyd: bool = False,
     prefix_override: Optional[str] = None,
+    pva: bool = True,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -42,6 +44,8 @@ def create_app(
             ``auto_start``, ``parameters``.
         disable_ophyd: Skip ophyd initialization (default False for API mode).
         prefix_override: Optional controller PV prefix override.
+        pva: If True use PV Access ("pva"), if False use Channel Access ("ca")
+            for the external PV client.  Default True.
 
     Returns:
         Configured FastAPI instance.
@@ -60,6 +64,9 @@ def create_app(
         plugins_dir=p_dir,
         disable_ophyd=disable_ophyd,
     )
+
+    # Initialise the shared PV client with the chosen provider.
+    pv_client.init(pva=pva)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -86,6 +93,7 @@ def create_app(
         yield
         logging.info("IOC Manager shutting down")
         controller.stop_all()
+        pv_client.close()
 
     app = FastAPI(
         title="IOC Manager",
@@ -121,6 +129,7 @@ def run_server():
     host = os.environ.get("IOCMNG_HOST", "0.0.0.0")
     port = int(os.environ.get("IOCMNG_PORT", "8080"))
     disable_ophyd = os.environ.get("IOCMNG_DISABLE_OPHYD", "false").lower() == "true"
+    pva = os.environ.get("IOCMNG_PVA", "true").lower() != "false"
 
     log_level = os.environ.get("IOCMNG_LOG_LEVEL", "info").lower()
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
@@ -142,5 +151,15 @@ def run_server():
         plugins_config_path=plugins_config_path,
         disable_ophyd=disable_ophyd,
         prefix_override=prefix_override,
+        pva=pva,
     )
     uvicorn.run(app, host=host, port=port, log_level=log_level, log_config=None)
+
+
+def run_standalone():
+    """Standalone CLI entry point.
+
+    This uses the same runtime as ``iocmng-server`` but is named explicitly for
+    local development and non-Helm execution.
+    """
+    run_server()

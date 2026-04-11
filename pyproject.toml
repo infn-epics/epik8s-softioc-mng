@@ -24,15 +24,18 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    "fastapi>=0.100.0",
-    "uvicorn[standard]>=0.20.0",
     "pyyaml>=6.0",
-    "pydantic>=2.0",
     "softioc",
     "cothread",
+    "p4p",
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "pydantic>=2.0",
+]
 ophyd = [
     "ophyd",
     "infn_ophyd_hal",
@@ -41,9 +44,10 @@ kubernetes = [
     "kubernetes",
 ]
 all = [
-    "iocmng[ophyd,kubernetes]",
+    "iocmng[server,ophyd,kubernetes]",
 ]
 dev = [
+    "iocmng[server]",
     "pytest>=7.0",
     "pytest-asyncio",
     "httpx",
@@ -54,7 +58,9 @@ dev = [
 ]
 
 [project.scripts]
+iocmng-run = "iocmng.runner:main"
 iocmng-server = "iocmng.api.app:run_server"
+iocmng-standalone = "iocmng.api.app:run_standalone"
 
 [project.urls]
 Repository = "https://github.com/infn-epics/epik8s-beamline-controller"

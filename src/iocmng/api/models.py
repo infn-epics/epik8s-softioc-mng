@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+from pydantic import model_validator
 
 
 class AddPluginRequest(BaseModel):
@@ -10,7 +11,8 @@ class AddPluginRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$",
                       description="Unique plugin name (alphanumeric, hyphens, underscores)")
-    git_url: str = Field(..., min_length=1, description="Git repository URL (https)")
+    git_url: Optional[str] = Field(None, min_length=1, description="Git repository URL")
+    local_path: Optional[str] = Field(None, min_length=1, description="Local filesystem path to a plugin source directory")
     path: str = Field("", description="Sub-path inside the git repo where the plugin Python file and config.yaml live (e.g. 'src/my_task')")
     pat: Optional[str] = Field(None, description="Personal Access Token for private repos")
     branch: str = Field("main", description="Branch or tag to clone")
@@ -18,6 +20,12 @@ class AddPluginRequest(BaseModel):
     auto_start_on_boot: bool = Field(False, description="Persist plugin for IOCMNG startup autoload")
     autostart_order: Optional[int] = Field(None, description="Autostart order on IOCMNG boot (lower starts first)")
     parameters: Optional[Dict[str, Any]] = Field(None, description="Extra parameters merged into config.yaml parameters")
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if not self.git_url and not self.local_path:
+            raise ValueError("Either git_url or local_path must be provided")
+        return self
 
 
 class RemovePluginRequest(BaseModel):
@@ -90,8 +98,74 @@ class PluginStartupInfoResponse(BaseModel):
     plugin_prefix: Optional[str] = None
     mode: Optional[str] = None
     start_parameters: Dict[str, Any]
-    pv_definitions: Dict[str, Any]
-    base_control_pvs: List[str]
-    additional_input_pvs: List[str]
-    additional_output_pvs: List[str]
-    built_pvs: List[str]
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    pv_definitions: Dict[str, Any] = Field(default_factory=dict)
+    base_control_pvs: List[str] = Field(default_factory=list)
+    additional_input_pvs: List[str] = Field(default_factory=list)
+    additional_output_pvs: List[str] = Field(default_factory=list)
+    built_pvs: List[str] = Field(default_factory=list)
+
+
+# ------------------------------------------------------------------
+# External PV client models
+# ------------------------------------------------------------------
+
+
+class PvGetRequest(BaseModel):
+    """Request body for reading an external PV."""
+
+    pv_name: str = Field(..., min_length=1, description="Full PV name")
+    timeout: float = Field(5.0, gt=0, description="Timeout in seconds")
+
+
+class PvPutRequest(BaseModel):
+    """Request body for writing to an external PV."""
+
+    pv_name: str = Field(..., min_length=1, description="Full PV name")
+    value: Any = Field(..., description="Value to write")
+    timeout: float = Field(5.0, gt=0, description="Timeout in seconds")
+
+
+class PvMonitorRequest(BaseModel):
+    """Request body for starting a PV subscription."""
+
+    pv_name: str = Field(..., min_length=1, description="Full PV name")
+    name: Optional[str] = Field(None, description="Friendly key for the subscription (defaults to pv_name)")
+
+
+class PvValueResponse(BaseModel):
+    """Response carrying a PV value."""
+
+    ok: bool
+    pv_name: str
+    value: Optional[Any] = None
+    error: Optional[str] = None
+
+
+class PvPutResponse(BaseModel):
+    """Response for a PV put operation."""
+
+    ok: bool
+    pv_name: str
+    error: Optional[str] = None
+
+
+class PvMonitorResponse(BaseModel):
+    """Response for monitor start/stop."""
+
+    ok: bool
+    key: Optional[str] = None
+    message: str
+
+
+class PvMonitorListResponse(BaseModel):
+    """List of active PV monitors."""
+
+    monitors: Dict[str, str]
+    count: int
+
+
+class PvProviderResponse(BaseModel):
+    """Current PV client provider info."""
+
+    provider: str

@@ -12,6 +12,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
+from iocmng.core.plugin_spec import PluginSpec, create_softioc_record
+
 
 class JobResult:
     """Result of a job execution."""
@@ -69,6 +71,7 @@ class JobBase(ABC):
         prefix: Optional[str] = None,
         plugin_prefix: Optional[str] = None,
         device_resolver: Optional[Any] = None,
+        plugin_spec: Optional[PluginSpec] = None,
     ):
         """Initialize a job.
 
@@ -83,8 +86,13 @@ class JobBase(ABC):
             device_resolver: Optional callable(name) -> device for lazy creation.
         """
         self.name = name
-        self.parameters = parameters or {}
-        self.pv_definitions = pv_definitions or {}
+        self.plugin_spec = plugin_spec or PluginSpec.from_runtime(
+            parameters=parameters,
+            pv_definitions=pv_definitions,
+            plugin_prefix=plugin_prefix or self.name.upper(),
+        )
+        self.parameters = dict(self.plugin_spec.parameters)
+        self.pv_definitions = self.plugin_spec.pv_definitions
         self.beamline_config = beamline_config or {}
         self.ophyd_devices = ophyd_devices or {}
         self._device_resolver = device_resolver
@@ -95,7 +103,7 @@ class JobBase(ABC):
         self.pvs: Dict[str, Any] = {}
 
         # PV prefix
-        self.plugin_prefix = plugin_prefix or self.name.upper()
+        self.plugin_prefix = self.plugin_spec.prefix or self.name.upper()
         self.pv_prefix = self._get_pv_prefix(prefix)
         self.logger.debug(
             "Job prefix resolution: name=%s controller_prefix=%r plugin_prefix=%r beamline=%r namespace=%r resolved_pv_prefix=%r",
@@ -142,57 +150,17 @@ class JobBase(ABC):
         self.pvs["MESSAGE"] = builder.stringIn("MESSAGE", initial_value="Idle")
 
         reserved = {"STATUS", "MESSAGE"}
-        for pv_name, pv_config in self.pv_definitions.get("inputs", {}).items():
+        for pv_name, pv_spec in self.plugin_spec.inputs.items():
             if pv_name in reserved:
                 continue
-            self.pvs[pv_name] = self._create_pv(pv_name, pv_config, is_output=True)
+            self.pvs[pv_name] = create_softioc_record(pv_spec)
 
-        for pv_name, pv_config in self.pv_definitions.get("outputs", {}).items():
+        for pv_name, pv_spec in self.plugin_spec.outputs.items():
             if pv_name in reserved:
                 continue
-            self.pvs[pv_name] = self._create_pv(pv_name, pv_config, is_output=False)
+            self.pvs[pv_name] = create_softioc_record(pv_spec)
 
         self.logger.info(f"Created {len(self.pvs)} PVs with prefix: {self.pv_prefix}")
-
-    @staticmethod
-    def _create_pv(pv_name: str, config: Dict[str, Any], is_output: bool):
-        from softioc import builder
-
-        pv_type = config.get("type", "float")
-        initial_value = config.get("value", 0)
-
-        if pv_type == "float":
-            kwargs = dict(
-                initial_value=float(initial_value),
-                EGU=config.get("unit", ""),
-                PREC=config.get("prec", 3),
-                LOPR=config.get("low", 0),
-                HOPR=config.get("high", 100),
-            )
-            if is_output:
-                return builder.aOut(pv_name, **kwargs)
-            return builder.aIn(pv_name, **kwargs)
-        elif pv_type == "int":
-            if is_output:
-                return builder.longOut(pv_name, initial_value=int(initial_value))
-            return builder.longIn(pv_name, initial_value=int(initial_value))
-        elif pv_type == "string":
-            if is_output:
-                return builder.stringOut(pv_name, initial_value=str(initial_value))
-            return builder.stringIn(pv_name, initial_value=str(initial_value))
-        elif pv_type == "bool":
-            kwargs = dict(
-                initial_value=int(initial_value),
-                ZNAM=config.get("znam", "Off"),
-                ONAM=config.get("onam", "On"),
-            )
-            if is_output:
-                return builder.boolOut(pv_name, **kwargs)
-            return builder.boolIn(pv_name, **kwargs)
-        else:
-            if is_output:
-                return builder.aOut(pv_name, initial_value=float(initial_value))
-            return builder.aIn(pv_name, initial_value=float(initial_value))
 
     def set_pv(self, pv_name: str, value: Any):
         """Set a PV value by name."""
@@ -206,6 +174,18 @@ class JobBase(ABC):
         if pv is not None:
             return pv.get()
         return None
+
+    def set_output(self, pv_name: str, value: Any):
+        self.set_pv(pv_name, value)
+
+    def get_output(self, pv_name: str) -> Any:
+        return self.get_pv(pv_name)
+
+    def set_input(self, pv_name: str, value: Any):
+        self.set_pv(pv_name, value)
+
+    def get_input(self, pv_name: str) -> Any:
+        return self.get_pv(pv_name)
 
     def set_status(self, status: str):
         """Set the STATUS PV (IDLE=0, RUNNING=1, SUCCESS=2, FAILED=3)."""

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from iocmng.base.task import TaskBase
 from iocmng.base.job import JobBase, JobResult
 from iocmng.core.loader import PluginLoader
+from iocmng.core.plugin_spec import PluginSpec, deep_merge_dicts
 from iocmng.core.validator import ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -20,13 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _deep_merge(base: Dict, override: Dict) -> Dict:
     """Recursively merge *override* into *base*, returning a new dict."""
-    result = dict(base)
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
+    return deep_merge_dicts(base, override)
 
 
 class PluginInfo:
@@ -41,6 +36,7 @@ class PluginInfo:
         path: str = "",
         branch: str = "main",
         pat: Optional[str] = None,
+        local_path: Optional[str] = None,
         parameters: Optional[Dict[str, Any]] = None,
         start_parameters: Optional[Dict[str, Any]] = None,
         pv_definitions: Optional[Dict[str, Any]] = None,
@@ -53,6 +49,7 @@ class PluginInfo:
     ):
         self.name = name
         self.git_url = git_url
+        self.local_path = local_path
         self.plugin_type = plugin_type  # "task" or "job"
         self.class_name = class_name
         self.path = path
@@ -98,6 +95,7 @@ class PluginInfo:
         d = {
             "name": self.name,
             "git_url": self.git_url,
+            "local_path": self.local_path,
             "plugin_type": self.plugin_type,
             "class_name": self.class_name,
             "path": self.path,
@@ -115,6 +113,7 @@ class PluginInfo:
             "mode": mode,
             "parameters": self.parameters,
             "start_parameters": self.start_parameters,
+            "arguments": self.pv_definitions,
             "pv_definitions": self.pv_definitions,
             "base_control_pvs": base_control_pvs,
             "additional_input_pvs": additional_input_pvs,
@@ -357,7 +356,8 @@ class IocMngController:
     def add_plugin(
         self,
         name: str,
-        git_url: str,
+        git_url: str = "",
+        local_path: Optional[str] = None,
         pat: Optional[str] = None,
         branch: str = "main",
         path: str = "",
@@ -399,14 +399,18 @@ class IocMngController:
 
         if staged_plugin_exists:
             git_url = git_url or staged_metadata.get("git_url", "")
+            local_path = local_path or staged_metadata.get("local_path")
             branch = branch or staged_metadata.get("branch", "main")
             path = path or staged_metadata.get("source_path", "")
-        elif not git_url:
-            return False, f"Plugin '{name}' is not staged locally and no git_url was provided", None
+        elif not git_url and not local_path:
+            return False, f"Plugin '{name}' is not staged locally and neither git_url nor local_path was provided", None
 
-        # 1. Clone if the plugin is not already staged locally.
+        # 1. Stage the plugin if it is not already present locally.
         if not staged_plugin_exists:
-            ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch, path=path, force=True)
+            if local_path:
+                ok, msg = self.loader.stage_local_plugin(name, local_path, path=path, force=True)
+            else:
+                ok, msg = self.loader.clone(name, git_url, pat=pat, branch=branch, path=path, force=True)
             if not ok:
                 return False, msg, None
             created_on_disk = True
@@ -420,11 +424,14 @@ class IocMngController:
 
         # 3. Load per-plugin config.yaml
         plugin_config = self.loader.load_plugin_config(name)
-        # Merge: REST parameters override config.yaml parameters
-        cfg_params = plugin_config.get("parameters", {})
-        merged_params = _deep_merge(cfg_params, parameters or {})
-        pv_defs = plugin_config.get("pvs", {})
-        plugin_prefix = plugin_config.get("prefix")
+        plugin_spec = PluginSpec.from_config(
+            config=plugin_config,
+            parameters_override=parameters,
+            default_prefix=name.upper(),
+        )
+        merged_params = plugin_spec.parameters
+        pv_defs = plugin_spec.pv_definitions
+        plugin_prefix = plugin_spec.prefix
 
         # 4. Validate
         validation = self.loader.validate(name)
@@ -460,6 +467,7 @@ class IocMngController:
                 prefix=self.config.get("prefix"),
                 plugin_prefix=plugin_prefix,
                 device_resolver=self.get_device,
+                plugin_spec=plugin_spec,
             )
         except Exception as e:
             if created_on_disk:
@@ -474,6 +482,7 @@ class IocMngController:
             path=path,
             branch=branch,
             pat=pat,
+            local_path=local_path,
             parameters=parameters or {},
             start_parameters=merged_params,
             pv_definitions=pv_defs,
@@ -523,6 +532,7 @@ class IocMngController:
             {
                 "name": name,
                 "git_url": git_url,
+                "local_path": local_path,
                 "branch": branch,
                 "source_path": path,
                 "plugin_type": load_result.plugin_type,
@@ -640,6 +650,7 @@ class IocMngController:
             "plugin_prefix": startup.get("plugin_prefix"),
             "mode": startup.get("mode"),
             "start_parameters": startup["start_parameters"],
+            "arguments": startup["arguments"],
             "pv_definitions": startup["pv_definitions"],
             "base_control_pvs": startup["base_control_pvs"],
             "additional_input_pvs": startup["additional_input_pvs"],
@@ -662,20 +673,22 @@ class IocMngController:
         metadata = self.loader.read_plugin_metadata(name)
         validation = self.loader.validate(name)
         plugin_config = self.loader.load_plugin_config(name)
+        plugin_spec = PluginSpec.from_config(plugin_config, default_prefix=name.upper())
         plugin_type = validation.plugin_type or metadata.get("plugin_type") or "unknown"
         class_name = validation.class_name or metadata.get("class_name") or ""
 
         return PluginInfo(
             name=name,
             git_url=metadata.get("git_url", ""),
+            local_path=metadata.get("local_path"),
             plugin_type=plugin_type,
             class_name=class_name,
             path=metadata.get("source_path", ""),
             branch=metadata.get("branch", "main"),
             parameters={},
-            start_parameters=plugin_config.get("parameters", {}),
-            pv_definitions=plugin_config.get("pvs", {}),
-            plugin_prefix=plugin_config.get("prefix", name.upper()),
+            start_parameters=plugin_spec.parameters,
+            pv_definitions=plugin_spec.pv_definitions,
+            plugin_prefix=plugin_spec.prefix or name.upper(),
             auto_start=metadata.get("auto_start", False),
             auto_start_on_boot=metadata.get("auto_start_on_boot", False),
             autostart_order=metadata.get("autostart_order"),
@@ -736,7 +749,10 @@ class IocMngController:
             self.loader.remove(temp_name)
 
         # 1. Clone to temp
-        ok, msg = self.loader.clone(temp_name, info.git_url, pat=info.pat, branch=info.branch, path=info.path)
+        if info.local_path:
+            ok, msg = self.loader.stage_local_plugin(temp_name, info.local_path, path=info.path, force=True)
+        else:
+            ok, msg = self.loader.clone(temp_name, info.git_url, pat=info.pat, branch=info.branch, path=info.path)
         if not ok:
             return False, f"Re-clone failed: {msg}", None
 
@@ -748,10 +764,14 @@ class IocMngController:
 
         # 3. Load config from temp, merge with original parameters
         plugin_config = self.loader.load_plugin_config(temp_name)
-        cfg_params = plugin_config.get("parameters", {})
-        merged_params = _deep_merge(cfg_params, info.parameters)
-        pv_defs = plugin_config.get("pvs", {})
-        plugin_prefix = plugin_config.get("prefix")
+        plugin_spec = PluginSpec.from_config(
+            config=plugin_config,
+            parameters_override=info.parameters,
+            default_prefix=name.upper(),
+        )
+        merged_params = plugin_spec.parameters
+        pv_defs = plugin_spec.pv_definitions
+        plugin_prefix = plugin_spec.prefix
 
         # 4. Validate temp
         validation = self.loader.validate(temp_name)
@@ -802,6 +822,7 @@ class IocMngController:
                 prefix=self.config.get("prefix"),
                 plugin_prefix=plugin_prefix,
                 device_resolver=self.get_device,
+                plugin_spec=plugin_spec,
             )
         except Exception as e:
             return False, f"Instantiation failed after swap: {e}", validation.to_dict()
@@ -814,6 +835,7 @@ class IocMngController:
             path=info.path,
             branch=info.branch,
             pat=info.pat,
+            local_path=info.local_path,
             parameters=info.parameters,
             start_parameters=merged_params,
             pv_definitions=pv_defs,
@@ -856,6 +878,7 @@ class IocMngController:
             {
                 "name": name,
                 "git_url": info.git_url,
+                "local_path": info.local_path,
                 "branch": info.branch,
                 "source_path": info.path,
                 "plugin_type": load_result.plugin_type,
@@ -876,7 +899,7 @@ class IocMngController:
         """Load a list of plugins defined in the initial plugins config.
 
         Each entry may contain:
-            name, git_url, path, branch, pat, auto_start, parameters.
+            name, git_url or local_path, path, branch, pat, auto_start, parameters.
 
         Args:
             plugins: List of plugin config dicts.
@@ -897,12 +920,14 @@ class IocMngController:
         for p in sorted(plugins, key=_sort_key):
             name = p.get("name")
             git_url = p.get("git_url")
-            if not name or not git_url:
-                results.append({"name": name, "ok": False, "message": "Missing name or git_url"})
+            local_path = p.get("local_path")
+            if not name or (not git_url and not local_path):
+                results.append({"name": name, "ok": False, "message": "Missing name and plugin source (git_url or local_path)"})
                 continue
             ok, msg, _ = self.add_plugin(
                 name=name,
                 git_url=git_url,
+                local_path=local_path,
                 pat=p.get("pat"),
                 branch=p.get("branch", "main"),
                 path=p.get("path", ""),
@@ -945,6 +970,7 @@ class IocMngController:
         new_entry = {
             "name": info.name,
             "git_url": info.git_url,
+            "local_path": info.local_path,
             "path": info.path,
             "branch": info.branch,
             "pat": info.pat,

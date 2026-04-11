@@ -9,8 +9,8 @@ parameters:
   interval: 1.0           # seconds between cycles (used by your execute logic)
   threshold: 75.0         # example application parameter
 
-# PV definitions — created automatically by the IOC Manager
-pvs:
+# Directional plugin arguments mapped to softIOC PVs
+arguments:
   inputs:
     SETPOINT:
       type: float

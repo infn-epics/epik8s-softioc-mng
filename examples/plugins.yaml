@@ -6,7 +6,8 @@
 #
 # Each entry:
 #   name        required  Unique plugin name (alphanumeric, hyphens, underscores)
-#   git_url     required  HTTPS git repository URL
+#   git_url     optional  HTTPS git repository URL
+#   local_path  optional  Local plugin directory for standalone development
 #   path        optional  Sub-directory inside the repo where the plugin lives
 #   branch      optional  Branch or tag to clone (default: main)
 #   pat         optional  Personal Access Token for private repos
@@ -33,3 +34,7 @@ plugins:
     path: jobs/report
     branch: main
     auto_start: false
+
+  # - name: local-monitor
+  #   local_path: /absolute/path/to/my-monitor-plugin
+  #   auto_start: false

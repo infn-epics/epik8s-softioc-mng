@@ -13,9 +13,18 @@ from iocmng.api.models import (
     PluginInfoResponse,
     PluginListResponse,
     PluginResponse,
+    PvGetRequest,
+    PvMonitorListResponse,
+    PvMonitorRequest,
+    PvMonitorResponse,
+    PvProviderResponse,
+    PvPutRequest,
+    PvPutResponse,
+    PvValueResponse,
     RestartResponse,
 )
 from iocmng.core.controller import IocMngController
+from iocmng.core import pv_client
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,7 @@ async def add_plugin(req: AddPluginRequest):
     ok, msg, validation = ctrl.add_plugin(
         name=req.name,
         git_url=req.git_url,
+        local_path=req.local_path,
         pat=req.pat,
         branch=req.branch,
         path=req.path,
@@ -139,6 +149,7 @@ async def add_task(req: AddPluginRequest):
     ok, msg, validation = ctrl.add_plugin(
         name=req.name,
         git_url=req.git_url,
+        local_path=req.local_path,
         pat=req.pat,
         branch=req.branch,
         path=req.path,
@@ -210,6 +221,7 @@ async def add_job(req: AddPluginRequest):
     ok, msg, validation = ctrl.add_plugin(
         name=req.name,
         git_url=req.git_url,
+        local_path=req.local_path,
         pat=req.pat,
         branch=req.branch,
         path=req.path,
@@ -317,3 +329,76 @@ async def list_devices():
         "created": created,
         "created_count": len(created),
     }
+
+
+# ------------------------------------------------------------------
+# External PV operations  (get / put / monitor via p4p)
+# ------------------------------------------------------------------
+
+
+@router.get("/pvs/provider", response_model=PvProviderResponse)
+async def pv_provider():
+    """Return the current PV client provider (``pva`` or ``ca``)."""
+    return PvProviderResponse(provider=pv_client.get_provider())
+
+
+@router.post("/pvs/get", response_model=PvValueResponse)
+async def pv_get(req: PvGetRequest):
+    """Read the current value of an external PV."""
+    try:
+        raw = pv_client.get(req.pv_name, timeout=req.timeout)
+        # p4p Value objects are not JSON-serialisable; convert to Python types.
+        try:
+            value = raw.todict() if hasattr(raw, "todict") else raw
+        except Exception:
+            value = str(raw)
+        return PvValueResponse(ok=True, pv_name=req.pv_name, value=value)
+    except Exception as exc:
+        logger.warning("pv_get(%s) failed: %s", req.pv_name, exc)
+        return PvValueResponse(ok=False, pv_name=req.pv_name, error=str(exc))
+
+
+@router.post("/pvs/put", response_model=PvPutResponse)
+async def pv_put(req: PvPutRequest):
+    """Write a value to an external PV."""
+    try:
+        pv_client.put(req.pv_name, req.value, timeout=req.timeout)
+        return PvPutResponse(ok=True, pv_name=req.pv_name)
+    except Exception as exc:
+        logger.warning("pv_put(%s) failed: %s", req.pv_name, exc)
+        return PvPutResponse(ok=False, pv_name=req.pv_name, error=str(exc))
+
+
+@router.post("/pvs/monitor", response_model=PvMonitorResponse)
+async def pv_monitor_start(req: PvMonitorRequest):
+    """Start monitoring an external PV.
+
+    Values are logged at DEBUG level.  Callers can poll
+    ``GET /pvs/get`` or use the subscription key to stop it later.
+    """
+    try:
+        key = pv_client.monitor(
+            req.pv_name,
+            callback=lambda v: logger.debug("monitor %s: %s", req.pv_name, v),
+            name=req.name,
+        )
+        return PvMonitorResponse(ok=True, key=key, message=f"Monitoring {req.pv_name}")
+    except Exception as exc:
+        logger.warning("pv_monitor(%s) failed: %s", req.pv_name, exc)
+        return PvMonitorResponse(ok=False, message=str(exc))
+
+
+@router.delete("/pvs/monitor/{key}", response_model=PvMonitorResponse)
+async def pv_monitor_stop(key: str):
+    """Stop a previously started PV monitor by its key."""
+    closed = pv_client.unmonitor(key)
+    if closed:
+        return PvMonitorResponse(ok=True, key=key, message=f"Stopped monitoring {key}")
+    raise HTTPException(status_code=404, detail=f"No active monitor with key '{key}'")
+
+
+@router.get("/pvs/monitors", response_model=PvMonitorListResponse)
+async def pv_monitors_list():
+    """List all active PV monitors."""
+    monitors = pv_client.active_monitors()
+    return PvMonitorListResponse(monitors=monitors, count=len(monitors))

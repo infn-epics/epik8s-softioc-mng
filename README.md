@@ -10,8 +10,9 @@ A pluggable task/job framework for IOC Manager applications. Provides base class
 - **Task startup metadata API** — inspect effective startup parameters and PV definitions for each loaded task
 - **Validation** — plugins are validated (must derive from base class, must compile, abstract methods must be implemented)
 - **EPICS soft IOC PVs** — every task and job gets default PVs (STATUS, MESSAGE, etc.) via `softioc`
-- **Per-plugin `config.yaml`** — each plugin defines its PVs and parameters in a config file inside its git repo
+- **Per-plugin `config.yaml`** — each plugin defines its parameters and directional soft IOC arguments in a config file
 - **Path support** — specify a sub-directory inside the git repo where the plugin sources live
+- **Standalone local loading** — load plugins from a local directory for development or non-Helm execution
 - **Staged plugin path** — when `path` is provided only that sub-directory is stored under `IOCMNG_PLUGINS_DIR/<plugin-name>`
 - **Autostart persistence** — uploaded tasks can be persisted for automatic reload on IOC Manager startup
 - **Autostart ordering** — define deterministic startup order for autostart tasks
@@ -38,6 +39,9 @@ pip install iocmng[all]
 # Using the CLI entry point
 iocmng-server
 
+# Explicit standalone alias
+iocmng-standalone
+
 # Or with environment variables
 IOCMNG_PORT=8080 IOCMNG_LOG_LEVEL=debug IOCMNG_PREFIX=SPARC:CONTROL iocmng-server
 
@@ -49,7 +53,7 @@ docker run -p 8080:8080 ghcr.io/infn-epics/epik8s-beamline-controller:latest
 
 Create a git repository with:
 1. A Python file with a class deriving from `TaskBase`
-2. A `config.yaml` defining PVs and parameters
+2. A `config.yaml` defining parameters and input/output arguments
 
 ```
 my-monitor-repo/
@@ -86,7 +90,7 @@ parameters:
   interval: 1.0
   threshold: 75.0
 
-pvs:
+arguments:
   inputs:
     SETPOINT:
       type: float
@@ -145,6 +149,19 @@ curl -X POST http://sparc-beamline-controller.k8sda.lnf.infn.it/api/v1/plugins \
 ```
 
 The plugin type (task / job) is determined automatically from the class found in the repo. The `/tasks` and `/jobs` endpoints are still available as type-checked aliases.
+
+For standalone local development, you can stage a plugin directly from the filesystem instead of cloning from git:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/plugins \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-monitor",
+    "local_path": "/absolute/path/to/my-monitor-plugin",
+    "auto_start": true,
+    "parameters": {"threshold": 80.0}
+  }'
+```
 
 #### Hot-reload a plugin (restart)
 ```bash
@@ -249,8 +266,9 @@ parameters:
   interval: 1.0             # application-specific
   threshold: 75.0           # application-specific
 
-# PV definitions — created automatically by the IOC Manager
-pvs:
+# Directional plugin arguments mapped to softIOC PVs
+# `arguments` is the preferred schema. Legacy `pvs` is still accepted.
+arguments:
   inputs:                   # writable PVs (operator → plugin)
     SETPOINT:
       type: float           # float, int, string, bool
@@ -271,6 +289,14 @@ pvs:
 ```
 
 `config.yaml`, `config.yml`, and `config.json` are supported. The config file is structurally validated before the plugin is accepted.
+
+The standard contract is:
+
+- `parameters`: non-PV runtime settings exposed to the plugin as `self.parameters`
+- `arguments.inputs`: writable soft IOC PVs for operator or higher-level IOC input
+- `arguments.outputs`: read-only soft IOC PVs published by the plugin
+
+Legacy `pvs.inputs` and `pvs.outputs` are normalized into the same internal model for backward compatibility.
 
 You may also define an optional top-level `prefix` in the plugin config. This is the task/job-specific PV prefix segment appended to the controller prefix.
 
@@ -296,7 +322,7 @@ When a task or job is added, the framework performs the following checks:
 
 1. **Clone** — the git repository is cloned (with optional PAT for private repos)
 2. **Dependencies** — `requirements.txt` is installed if present (from `path` or repo root)
-3. **Config** — `config.yaml` is loaded from `path` to read PV definitions and default parameters
+3. **Config** — `config.yaml` is loaded from `path` to read standardized argument definitions and default parameters
 4. **Syntax** — Python files are parsed via AST for syntax errors
 5. **Import** — the module is imported to check for runtime import errors
 6. **Inheritance** — at least one class must derive from `TaskBase` or `JobBase`
@@ -347,7 +373,7 @@ Every job gets:
 | `STATUS` | mbbIn | IDLE / RUNNING / SUCCESS / FAILED |
 | `MESSAGE` | stringIn | Human-readable status message |
 
-Additional PVs are created from the `pvs` section of `config.yaml`.
+Additional PVs are created from the normalized `arguments` section of `config.yaml`.
 
 ## Choosing Between Continuous Task, Triggered Task, and Job
 
@@ -389,11 +415,18 @@ plugins:
     git_url: https://github.com/org/beamline-jobs.git
     path: jobs/report
     auto_start: false            # jobs default to false; tasks default to true
+
+  - name: local-monitor
+    local_path: /absolute/path/to/my-monitor-plugin
+    auto_start: true
 ```
 
 ```bash
 export IOCMNG_PLUGINS_CONFIG=/etc/iocmng/plugins.yaml
 iocmng-server
+
+# same runtime, explicit non-Helm/dev alias
+iocmng-standalone
 ```
 
 Startup behavior details:

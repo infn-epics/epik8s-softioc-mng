@@ -122,3 +122,47 @@ class TestPluginValidator:
         result = PluginValidator.validate_directory(tmp_path)
         assert not result.ok
         assert any("Config parse error" in error for error in result.errors)
+
+        def test_arguments_schema_is_valid(self, tmp_path):
+                code = textwrap.dedent("""\
+                from iocmng import TaskBase
+
+                class DirTask(TaskBase):
+                        def initialize(self): pass
+                        def execute(self): pass
+                        def cleanup(self): pass
+                """)
+                (tmp_path / "plugin.py").write_text(code)
+                (tmp_path / "config.yaml").write_text(textwrap.dedent("""\
+                arguments:
+                    inputs:
+                        SETPOINT:
+                            type: float
+                            value: 1.0
+                    outputs:
+                        VALUE:
+                            type: float
+                            value: 0.0
+                """))
+                result = PluginValidator.validate_directory(tmp_path)
+                assert result.ok
+
+        def test_arguments_schema_rejects_invalid_type(self, tmp_path):
+                code = textwrap.dedent("""\
+                from iocmng import TaskBase
+
+                class DirTask(TaskBase):
+                        def initialize(self): pass
+                        def execute(self): pass
+                        def cleanup(self): pass
+                """)
+                (tmp_path / "plugin.py").write_text(code)
+                (tmp_path / "config.yaml").write_text(textwrap.dedent("""\
+                arguments:
+                    outputs:
+                        VALUE:
+                            type: waveform
+                """))
+                result = PluginValidator.validate_directory(tmp_path)
+                assert not result.ok
+                assert any("invalid type" in error for error in result.errors)

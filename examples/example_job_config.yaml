@@ -8,8 +8,8 @@ parameters:
   collect_network: false   # whether to include network info
   timeout: 30              # seconds before the job times out
 
-# PV definitions — created automatically by the IOC Manager
-pvs:
+# Directional plugin arguments mapped to softIOC PVs
+arguments:
   outputs:
     PYTHON_VERSION:
       type: string

@@ -74,6 +74,15 @@ class TestTaskBase:
         t = DummyTask(name="mytest", prefix="CUSTOM:PREFIX")
         assert t.pv_prefix == "CUSTOM:PREFIX:MYTEST"
 
+    def test_task_builds_plugin_spec_from_legacy_runtime_fields(self):
+        t = DummyTask(
+            name="spec-task",
+            parameters={"interval": 0.5},
+            pv_definitions={"inputs": {"SETPOINT": {"type": "float", "value": 1.0}}},
+        )
+        assert t.parameters["interval"] == 0.5
+        assert "SETPOINT" in t.plugin_spec.inputs
+
 
 # ------------------------------------------------------------------
 # Job tests
@@ -93,6 +102,15 @@ class TestJobBase:
     def test_job_pv_prefix_override(self):
         j = DummyJob(name="myjob", prefix="CUSTOM:PREFIX")
         assert j.pv_prefix == "CUSTOM:PREFIX:MYJOB"
+
+    def test_job_builds_plugin_spec_from_legacy_runtime_fields(self):
+        j = DummyJob(
+            name="spec-job",
+            parameters={"timeout": 10},
+            pv_definitions={"outputs": {"RESULT": {"type": "string", "value": ""}}},
+        )
+        assert j.parameters["timeout"] == 10
+        assert "RESULT" in j.plugin_spec.outputs
 
     def test_run_job(self):
         j = DummyJob(name="runner")

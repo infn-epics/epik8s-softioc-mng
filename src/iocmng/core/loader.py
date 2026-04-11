@@ -181,6 +181,50 @@ class PluginLoader:
 
         return True, clone_message
 
+    def stage_local_plugin(self, name: str, local_path: str, path: str = "", force: bool = False) -> Tuple[bool, str]:
+        """Stage a plugin from a local filesystem path.
+
+        Args:
+            name: Unique plugin name (used as directory name).
+            local_path: Root directory containing the plugin sources.
+            path: Optional sub-path inside *local_path*.
+            force: If True, remove any existing staged directory first.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        dest = self.plugin_path(name)
+        if dest.exists():
+            if force:
+                logger.warning("Removing stale plugin directory '%s' before re-stage", dest)
+                shutil.rmtree(dest)
+            else:
+                return False, f"Plugin '{name}' already exists. Remove it first."
+
+        local_root = Path(local_path).expanduser().resolve()
+        if not local_root.exists() or not local_root.is_dir():
+            return False, f"Local plugin path '{local_root}' not found or is not a directory"
+
+        selected_root = local_root / path if path else local_root
+        if not selected_root.exists() or not selected_root.is_dir():
+            return False, f"Path '{path}' not found inside local plugin path '{local_root}'"
+
+        shutil.copytree(selected_root, dest)
+        requirements_in_selected_path = selected_root / "requirements.txt"
+        requirements_in_root = local_root / "requirements.txt"
+        if not requirements_in_selected_path.exists() and requirements_in_root.exists():
+            shutil.copy2(requirements_in_root, dest / "requirements.txt")
+
+        self.write_plugin_metadata(
+            name,
+            {
+                "name": name,
+                "local_path": str(local_root),
+                "source_path": path,
+            },
+        )
+        return True, f"Staged local plugin from {selected_root} into {dest}"
+
     def install_requirements(self, name: str, path: str = "") -> Tuple[bool, str]:
         """Install requirements.txt if present in the plugin source directory.
 

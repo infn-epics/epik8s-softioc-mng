@@ -45,12 +45,13 @@ JOB_CODE = textwrap.dedent("""\
 TASK_CONFIG = {
     "parameters": {"mode": "continuous", "interval": 0.1, "threshold": 50.0},
     "prefix": "MY_TASK",
-    "pvs": {"outputs": {"VALUE": {"type": "float", "value": 0.0}}},
+    "arguments": {"outputs": {"VALUE": {"type": "float", "value": 0.0}}},
 }
 
 JOB_CONFIG = {
     "prefix": "MY_JOB",
     "parameters": {"mode": "job"},
+    "arguments": {"outputs": {"SYSTEM_NAME": {"type": "string", "value": ""}}},
 }
 
 
@@ -79,6 +80,15 @@ def _make_git_repo(tmp_path: Path, subdir: str, python_code: str, config: dict) 
     subprocess.run(["git", "clone", "--bare", str(work), str(bare)],
                    check=True, capture_output=True)
     return f"file://{bare}"
+
+
+def _make_local_plugin_dir(tmp_path: Path, subdir: str, python_code: str, config: dict) -> Path:
+    root = tmp_path / "local-plugin"
+    src = root / subdir
+    src.mkdir(parents=True)
+    (src / "plugin.py").write_text(python_code)
+    (src / "config.yaml").write_text(yaml.dump(config))
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +253,16 @@ class TestPluginsEndpoint:
         assert (plugin_root / "plugin.py").exists()
         assert (plugin_root / "config.yaml").exists()
         assert not (plugin_root / "task").exists()
+
+    def test_add_local_task_plugin(self, client, tmp_path):
+        local_plugin_dir = _make_local_plugin_dir(tmp_path, "task", TASK_CODE, TASK_CONFIG)
+        r = client.post("/api/v1/plugins", json={
+            "name": "local-task",
+            "local_path": str(local_plugin_dir),
+            "path": "task",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
 
     def test_add_task_then_list(self, client, task_repo):
         client.post("/api/v1/plugins", json={
@@ -435,6 +455,8 @@ class TestTasksAlias:
         assert d["plugin_prefix"] == "MY_TASK"
         assert d["mode"] == "continuous"
         assert d["start_parameters"]["threshold"] == 77.0
+        assert "arguments" in d
+        assert "outputs" in d["arguments"]
         assert "ENABLE" in d["base_control_pvs"]
         assert "STATUS" in d["base_control_pvs"]
         assert "VALUE" in d["additional_output_pvs"]
@@ -581,6 +603,7 @@ class TestJobsAlias:
         assert d["pv_prefix"] == "BEAMLINE:DEFAULT:MY_JOB"
         assert d["plugin_prefix"] == "MY_JOB"
         assert d["mode"] is None
+        assert "outputs" in d["arguments"]
         assert "STATUS" in d["base_control_pvs"]
         assert "MESSAGE" in d["base_control_pvs"]
 

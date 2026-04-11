@@ -97,6 +97,7 @@ def run_ioc(
     prefix: Optional[str] = None,
     pva: bool = True,
     name: Optional[str] = None,
+    pvout: Optional[Union[str, Path]] = None,
 ) -> None:
     """Run a soft IOC for a single task or job — blocking.
 
@@ -114,6 +115,7 @@ def run_ioc(
         pva: If *True* (default) initialise ``pv_client`` with PVA;
             *False* for Channel Access.
         name: IOC name.  Defaults to the class name in lower-case.
+        pvout: Path to write the list of PV names (one per line).
     """
     global _shutdown
     _shutdown = False
@@ -159,6 +161,13 @@ def run_ioc(
         plugin_class.__name__,
         pv_client.get_provider(),
     )
+
+    # ── Optionally dump PV list ──────────────────────────────────────
+    if pvout:
+        pv_names = [f"{instance.pv_prefix}:{pv}" for pv in instance.pvs.keys()]
+        Path(pvout).parent.mkdir(parents=True, exist_ok=True)
+        Path(pvout).write_text("\n".join(sorted(pv_names)) + "\n")
+        logger.info("Wrote %d PVs to %s", len(pv_names), pvout)
 
     # ── Register signal handlers ─────────────────────────────────────
     signal.signal(signal.SIGINT, _signal_handler)
@@ -234,6 +243,11 @@ def main() -> None:
         help="Logging level. Default: INFO.",
     )
     parser.add_argument(
+        "--pvout",
+        default=None,
+        help="Path to write PV list (one PV name per line).",
+    )
+    parser.add_argument(
         "-p", "--param",
         action="append",
         metavar="KEY=VALUE",
@@ -279,4 +293,5 @@ def main() -> None:
         prefix=args.prefix,
         pva=args.pva == "true",
         name=args.name,
+        pvout=args.pvout,
     )

@@ -63,7 +63,7 @@ iocmng-server = "iocmng.api.app:run_server"
 iocmng-standalone = "iocmng.api.app:run_standalone"
 
 [project.urls]
-Repository = "https://github.com/infn-epics/epik8s-beamline-controller"
+Repository = "https://github.com/infn-epics/epik8s-softioc-mng"
 
 [tool.setuptools.dynamic]
 version = { attr = "iocmng.__version__" }

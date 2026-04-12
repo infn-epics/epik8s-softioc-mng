@@ -132,7 +132,7 @@ def run_ioc(
     plugin_spec = PluginSpec.from_config(
         config=raw_config,
         parameters_override=parameters,
-        default_prefix=prefix or ioc_name.upper(),
+        default_prefix=ioc_name.upper(),
     )
 
     # ── Initialise pv_client ─────────────────────────────────────────

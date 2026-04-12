@@ -14,7 +14,7 @@ cothread
 # Optional: Ophyd device abstraction
 # ophyd
 infn_ophyd_hal
-
+epik8s-tools
 p4p
 # Optional: Kubernetes integration
 # kubernetes

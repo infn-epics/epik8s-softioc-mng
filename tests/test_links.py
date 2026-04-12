@@ -290,8 +290,182 @@ class TestLinkPut:
         task = LinkTask(name="test", plugin_spec=spec)
         task.initialize()
 
-        with pytest.raises(KeyError, match="not a wired input"):
+        with pytest.raises(KeyError, match="not a wired PV"):
             task.link_put("local", 0)
+
+
+# ---------------------------------------------------------------------------
+# Output links
+# ---------------------------------------------------------------------------
+
+class TestOutputLinks:
+
+    def test_output_wired(self):
+        """Outputs can have link fields just like inputs."""
+        spec = PvArgumentSpec.from_config("alarm", "output", {
+            "type": "bool", "value": 0,
+            "link": "EXT:ALARM:STATUS",
+        })
+        assert spec.wired is True
+        assert spec.link == "EXT:ALARM:STATUS"
+        assert spec.direction == "output"
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_set_pv_forwards_to_linked_output(self, mock_init, mock_put):
+        """set_pv on a wired output should auto-forward to the external PV."""
+        config = {
+            "arguments": {
+                "outputs": {
+                    "alarm": {
+                        "type": "bool", "value": 0,
+                        "link": "EXT:ALARM:STATUS",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["alarm"] = mock_pv
+
+        task.set_pv("alarm", 1)
+
+        mock_pv.set.assert_called_once_with(1)
+        mock_put.assert_called_once_with("EXT:ALARM:STATUS", 1, timeout=5.0)
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_set_pv_no_forward_for_unwired_output(self, mock_init, mock_put):
+        """set_pv on an unwired output should NOT call pv_client.put."""
+        config = {
+            "arguments": {
+                "outputs": {
+                    "local_out": {"type": "int", "value": 0},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["local_out"] = mock_pv
+
+        task.set_pv("local_out", 42)
+        mock_pv.set.assert_called_once_with(42)
+        mock_put.assert_not_called()
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_link_put_works_on_wired_output(self, mock_init, mock_put):
+        """link_put should work on wired outputs, not just inputs."""
+        config = {
+            "arguments": {
+                "outputs": {
+                    "cmd": {
+                        "type": "int", "value": 0,
+                        "link": "EXT:CMD",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task.link_put("cmd", 5)
+        mock_put.assert_called_once_with("EXT:CMD", 5, timeout=5.0)
+
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.init")
+    def test_poll_links_reads_wired_outputs(self, mock_init, mock_get):
+        """Wired outputs with poll mode should be read for read-back."""
+        mock_get.return_value = 99
+        config = {
+            "parameters": {"interval": 0.01},
+            "arguments": {
+                "outputs": {
+                    "readback": {
+                        "type": "int", "value": 0,
+                        "link": "EXT:READBACK",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.link_values["readback"] = 0
+
+        task._poll_links()
+        mock_get.assert_called_once()
+        assert task.link_values["readback"] == 99
+
+    @patch("iocmng.core.pv_client.monitor")
+    @patch("iocmng.core.pv_client.init")
+    def test_start_link_monitors_includes_outputs(self, mock_init, mock_monitor):
+        """Wired outputs with monitor mode should get subscriptions."""
+        config = {
+            "arguments": {
+                "outputs": {
+                    "fb": {
+                        "type": "int", "value": 0,
+                        "link": "EXT:FEEDBACK", "link_mode": "monitor",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task._start_link_monitors()
+
+        mock_monitor.assert_called_once()
+        assert mock_monitor.call_args.kwargs["name"] == "_link_fb"
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_rule_fires_output_with_link(self, mock_init, mock_put):
+        """When a rule sets a wired output, it should forward to the external PV."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:SENSOR"},
+                },
+                "outputs": {
+                    "alarm": {
+                        "type": "bool", "value": 0,
+                        "link": "EXT:ALARM:ACTIVE",
+                    },
+                },
+            },
+            "rules": [
+                {
+                    "id": "ALARM_ON",
+                    "condition": "sensor == 0",
+                    "message": "Sensor down — alarm on",
+                    "outputs": {"alarm": 1},
+                },
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["alarm"] = mock_pv
+
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+
+        # Local PV was set
+        mock_pv.set.assert_called_with(1)
+        # External PV was also forwarded
+        mock_put.assert_called_once_with("EXT:ALARM:ACTIVE", 1, timeout=5.0)
 
 
 # ---------------------------------------------------------------------------

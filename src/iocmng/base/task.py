@@ -270,6 +270,15 @@ class TaskBase(ABC):
     def set_pv(self, pv_name: str, value: Any):
         if pv_name in self.pvs:
             self.pvs[pv_name].set(value)
+        # Auto-forward to linked external PV for wired outputs
+        spec = self.plugin_spec.outputs.get(pv_name)
+        if spec is not None and spec.wired:
+            try:
+                from iocmng.core import pv_client
+                timeout = float(self.parameters.get("timeout", 5.0))
+                pv_client.put(spec.link, value, timeout=timeout)
+            except Exception as exc:
+                self.logger.warning("output forward failed: %s -> %s: %s", pv_name, spec.link, exc)
 
     def get_pv(self, pv_name: str) -> Any:
         if pv_name in self.pvs:
@@ -374,11 +383,22 @@ class TaskBase(ABC):
             if spec.wired:
                 yield name, spec
 
+    def _wired_outputs(self):
+        """Yield (name, spec) for outputs that have a link."""
+        for name, spec in self.plugin_spec.outputs.items():
+            if spec.wired:
+                yield name, spec
+
+    def _all_wired(self):
+        """Yield (name, spec) for all wired PVs (inputs + outputs)."""
+        yield from self._wired_inputs()
+        yield from self._wired_outputs()
+
     def _start_link_monitors(self):
-        """Set up pv_client monitors for wired inputs with mode=monitor."""
+        """Set up pv_client monitors for all wired PVs with mode=monitor."""
         from iocmng.core import pv_client
 
-        for name, spec in self._wired_inputs():
+        for name, spec in self._all_wired():
             # Initialise value cache
             self.link_values[name] = spec.value
             self._link_prev[name] = spec.value
@@ -394,7 +414,7 @@ class TaskBase(ABC):
         """Close all link monitors."""
         from iocmng.core import pv_client
 
-        for name, spec in self._wired_inputs():
+        for name, spec in self._all_wired():
             if spec.link_mode == "monitor":
                 pv_client.unmonitor(f"_link_{name}")
 
@@ -421,13 +441,13 @@ class TaskBase(ABC):
         return _cb
 
     def _poll_links(self):
-        """Read wired inputs with mode=poll (called from _run_wrapper)."""
+        """Read all wired PVs with mode=poll (called from _run_wrapper)."""
         from iocmng.core import pv_client
 
         timeout = float(self.parameters.get("timeout", 5.0))
         now = time.monotonic()
 
-        for name, spec in self._wired_inputs():
+        for name, spec in self._all_wired():
             if spec.link_mode != "poll":
                 continue
             # Per-input poll rate gating
@@ -457,24 +477,24 @@ class TaskBase(ABC):
                     self.logger.error("on_input_changed(%s) error: %s", name, exc)
 
     def link_put(self, key: str, value: Any, timeout: float = 5.0):
-        """Write a value to the external PV of a wired input.
+        """Write a value to the external PV of a wired input or output.
 
         This is the primary way for task code to actuate an external PV
-        declared as a wired input.
+        declared as a wired input or output.
 
         Args:
-            key: The input name (must have a ``link``).
+            key: The PV name (must have a ``link``).
             value: The value to write.
             timeout: CA/PVA put timeout.
 
         Raises:
-            KeyError: if the input does not exist or is not wired.
+            KeyError: if the PV does not exist or is not wired.
         """
         from iocmng.core import pv_client
 
-        spec = self.plugin_spec.inputs.get(key)
+        spec = self.plugin_spec.inputs.get(key) or self.plugin_spec.outputs.get(key)
         if spec is None or not spec.wired:
-            raise KeyError(f"Input {key!r} is not a wired input")
+            raise KeyError(f"{key!r} is not a wired PV")
         pv_client.put(spec.link, value, timeout=timeout)
         self.logger.debug("link_put(%s, %s) -> %s", key, value, spec.link)
 

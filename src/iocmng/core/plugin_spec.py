@@ -137,6 +137,9 @@ class PvArgumentSpec:
 
     @property
     def writable(self) -> bool:
+        # Wired inputs are updated by the link engine, not by clients
+        if self.wired:
+            return False
         return self.direction == "input"
 
     @property

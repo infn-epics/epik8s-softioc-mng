@@ -171,6 +171,11 @@ class TaskBase(ABC):
         )
         self.pvs["MESSAGE"] = builder.stringIn("MESSAGE", initial_value="Initialized")
 
+        # VERSION: library or user-specified version
+        import iocmng
+        version_str = self.plugin_spec.parameters.get("version", iocmng.__version__)
+        self.pvs["VERSION"] = builder.stringIn("VERSION", initial_value=str(version_str))
+
         if self.mode == "triggered":
             self.pvs["RUN"] = builder.boolOut(
                 "RUN",
@@ -180,7 +185,7 @@ class TaskBase(ABC):
         if self.mode in ("continuous", "reactive"):
             self.pvs["CYCLE_COUNT"] = builder.longIn("CYCLE_COUNT", initial_value=0)
 
-        reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT"}
+        reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION"}
         for pv_name, pv_spec in self.plugin_spec.inputs.items():
             if pv_name in reserved:
                 continue

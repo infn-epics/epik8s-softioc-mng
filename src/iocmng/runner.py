@@ -150,6 +150,11 @@ def run_ioc(
         plugin_prefix=plugin_spec.prefix,
         plugin_spec=plugin_spec,
     )
+    # In standalone mode --prefix is the complete PV prefix, not a controller
+    # namespace.  Override pv_prefix directly so _get_pv_prefix() does not
+    # append plugin_prefix a second time (e.g. SPARC:SOFTINTLK:SOFTINTERLOCK).
+    if prefix:
+        instance.pv_prefix = prefix
 
     # ── Build soft IOC records ───────────────────────────────────────
     _init_softioc(instance)

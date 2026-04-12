@@ -147,6 +147,32 @@ class TestRunIocTask:
         t.join(timeout=2)
 
     @patch("iocmng.runner._init_softioc")
+    def test_explicit_prefix_used_as_full_pv_prefix(self, mock_init_ioc):
+        """--prefix is the complete PV prefix; plugin_prefix must NOT be appended."""
+        import iocmng.runner as runner_mod
+
+        def _fire():
+            import time
+            time.sleep(0.1)
+            runner_mod._shutdown = True
+
+        t = threading.Thread(target=_fire, daemon=True)
+        t.start()
+
+        run_ioc(
+            DummyTask,
+            config={"parameters": {"interval": 0.01}},
+            prefix="SPARC:SOFTINTLK",
+            pva=False,
+            name="softinterlock",
+        )
+        t.join(timeout=2)
+
+        # pv_prefix must equal the explicit prefix, not SPARC:SOFTINTLK:SOFTINTERLOCK
+        captured = mock_init_ioc.call_args[0][0]
+        assert captured.pv_prefix == "SPARC:SOFTINTLK"
+
+    @patch("iocmng.runner._init_softioc")
     def test_task_with_dict_config(self, mock_init_ioc):
         """run_ioc accepts a dict as config."""
         import iocmng.runner as runner_mod

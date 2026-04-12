@@ -2,7 +2,7 @@
 <display typeId="org.csstudio.opibuilder.Display" version="1.0.0">
   <name>Task Control Panel</name>
   <width>1000</width>
-  <height>150</height>
+  <height>180</height>
   <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
     <x>10</x>
     <y>10</y>
@@ -99,7 +99,7 @@
     <y>80</y>
     <width>60</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:MONITOR_01:ENABLE</pv_name>
+    <pv_name>SPARC:CONTROL2:MONITOR_01:ENABLE</pv_name>
     <text>Enable</text>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
@@ -107,7 +107,7 @@
     <y>80</y>
     <width>80</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:MONITOR_01:STATUS</pv_name>
+    <pv_name>SPARC:CONTROL2:MONITOR_01:STATUS</pv_name>
     <read_only>true</read_only>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
@@ -115,7 +115,7 @@
     <y>80</y>
     <width>60</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:MONITOR_01:CYCLE_COUNT</pv_name>
+    <pv_name>SPARC:CONTROL2:MONITOR_01:CYCLE_COUNT</pv_name>
     <read_only>true</read_only>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
@@ -123,7 +123,7 @@
     <y>80</y>
     <width>350</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:MONITOR_01:MESSAGE</pv_name>
+    <pv_name>SPARC:CONTROL2:MONITOR_01:MESSAGE</pv_name>
     <read_only>true</read_only>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.ActionButton" version="1.0.0">
@@ -152,7 +152,7 @@
     <y>110</y>
     <width>60</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:CHECK_MOTOR_MOVEMENT:ENABLE</pv_name>
+    <pv_name>SPARC:CONTROL2:CHECK_MOTOR_MOVEMENT:ENABLE</pv_name>
     <text>Enable</text>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
@@ -160,7 +160,7 @@
     <y>110</y>
     <width>80</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:CHECK_MOTOR_MOVEMENT:STATUS</pv_name>
+    <pv_name>SPARC:CONTROL2:CHECK_MOTOR_MOVEMENT:STATUS</pv_name>
     <read_only>true</read_only>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
@@ -168,7 +168,7 @@
     <y>110</y>
     <width>60</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:CHECK_MOTOR_MOVEMENT:CYCLE_COUNT</pv_name>
+    <pv_name>SPARC:CONTROL2:CHECK_MOTOR_MOVEMENT:CYCLE_COUNT</pv_name>
     <read_only>true</read_only>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
@@ -176,7 +176,7 @@
     <y>110</y>
     <width>350</width>
     <height>20</height>
-    <pv_name>SPARC:CONTROL:CHECK_MOTOR_MOVEMENT:MESSAGE</pv_name>
+    <pv_name>SPARC:CONTROL2:CHECK_MOTOR_MOVEMENT:MESSAGE</pv_name>
     <read_only>true</read_only>
   </widget>
   <widget typeId="org.csstudio.opibuilder.widgets.ActionButton" version="1.0.0">
@@ -188,6 +188,59 @@
     <actions>
       <action type="OPEN_DISPLAY">
         <path>check_motor_movement_detail.bob</path>
+        <target>TAB</target>
+        <description>Show Panel</description>
+      </action>
+    </actions>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <x>10</x>
+    <y>140</y>
+    <width>150</width>
+    <height>20</height>
+    <text>ioc_manager</text>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.BoolButton" version="1.0.0">
+    <x>170</x>
+    <y>140</y>
+    <width>60</width>
+    <height>20</height>
+    <pv_name>SPARC:CONTROL2:IOC_MANAGER:ENABLE</pv_name>
+    <text>Enable</text>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
+    <x>240</x>
+    <y>140</y>
+    <width>80</width>
+    <height>20</height>
+    <pv_name>SPARC:CONTROL2:IOC_MANAGER:STATUS</pv_name>
+    <read_only>true</read_only>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
+    <x>330</x>
+    <y>140</y>
+    <width>60</width>
+    <height>20</height>
+    <pv_name>SPARC:CONTROL2:IOC_MANAGER:CYCLE_COUNT</pv_name>
+    <read_only>true</read_only>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
+    <x>400</x>
+    <y>140</y>
+    <width>350</width>
+    <height>20</height>
+    <pv_name>SPARC:CONTROL2:IOC_MANAGER:MESSAGE</pv_name>
+    <read_only>true</read_only>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.ActionButton" version="1.0.0">
+    <x>760</x>
+    <y>140</y>
+    <width>100</width>
+    <height>20</height>
+    <text>Show Panel</text>
+    <actions>
+      <action type="OPEN_DISPLAY">
+        <path>ioc_manager_detail.bob</path>
         <target>TAB</target>
         <description>Show Panel</description>
       </action>

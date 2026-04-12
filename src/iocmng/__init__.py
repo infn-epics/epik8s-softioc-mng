@@ -11,5 +11,6 @@ from iocmng.base.task import TaskBase
 from iocmng.base.job import JobBase
 from iocmng.core import pv_client
 from iocmng.runner import run_ioc
+from iocmng.declarative import DeclarativeTask
 
-__all__ = ["TaskBase", "JobBase", "pv_client", "run_ioc", "__version__"]
+__all__ = ["TaskBase", "JobBase", "DeclarativeTask", "pv_client", "run_ioc", "__version__"]

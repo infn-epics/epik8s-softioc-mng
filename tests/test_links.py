@@ -595,3 +595,183 @@ class TestReactiveMode:
 
         mock_monitor.assert_called_once()
         assert mock_monitor.call_args.kwargs["name"] == "_link_sig"
+
+
+# ---------------------------------------------------------------------------
+# Rule defaults
+# ---------------------------------------------------------------------------
+
+class TestRuleDefaults:
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_rule_defaults_applied_before_rules(self, mock_init, mock_put):
+        """rule_defaults should reset outputs before rule evaluation."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["ALARM"] = mock_pv
+
+        # sensor == 0 → rule fires → ALARM set to 0 (default) then 1 (rule)
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        calls = mock_pv.set.call_args_list
+        assert calls[0] == call(0)  # rule_defaults
+        assert calls[1] == call(1)  # rule output
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_rule_defaults_remain_when_no_rule_fires(self, mock_init, mock_put):
+        """When no rule fires, only rule_defaults should be applied."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["ALARM"] = mock_pv
+
+        task.link_values = {"sensor": 1}  # condition false
+        task._evaluate_rules()
+
+        mock_pv.set.assert_called_once_with(0)  # only default
+
+    def test_plugin_spec_parses_rule_defaults(self):
+        config = {
+            "rule_defaults": {"INTLK_ACT": 0, "MOVING": 0},
+            "rules": [{"id": "R", "condition": "True"}],
+        }
+        spec = PluginSpec.from_config(config)
+        assert spec.rule_defaults == {"INTLK_ACT": 0, "MOVING": 0}
+
+    def test_no_rule_defaults_by_default(self):
+        spec = PluginSpec.from_config({"parameters": {}})
+        assert spec.rule_defaults == {}
+
+
+# ---------------------------------------------------------------------------
+# Message PV
+# ---------------------------------------------------------------------------
+
+class TestMessagePv:
+
+    def test_rule_spec_message_pv(self):
+        rule = RuleSpec.from_config({
+            "id": "R1",
+            "condition": "True",
+            "message": "something happened",
+            "message_pv": "INTLK_MSG",
+        })
+        assert rule.message_pv == "INTLK_MSG"
+
+    def test_rule_spec_message_pv_default_none(self):
+        rule = RuleSpec.from_config({"id": "R", "condition": "True"})
+        assert rule.message_pv is None
+
+    def test_rule_spec_to_dict_includes_message_pv(self):
+        rule = RuleSpec(id="R", condition="True", message="msg", message_pv="OUT")
+        d = rule.to_dict()
+        assert d["message_pv"] == "OUT"
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_fire_rule_writes_timestamped_message(self, mock_init, mock_put):
+        config = {
+            "arguments": {
+                "inputs": {
+                    "x": {"type": "int", "value": 0, "link": "EXT:X"},
+                },
+                "outputs": {
+                    "MSG": {"type": "string", "value": ""},
+                },
+            },
+            "rules": [
+                {
+                    "id": "R1",
+                    "condition": "x == 0",
+                    "message": "Alert!",
+                    "message_pv": "MSG",
+                },
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["MSG"] = mock_pv
+        task.link_values = {"x": 0}
+
+        task._evaluate_rules()
+
+        # Should have been called with a timestamped string
+        assert mock_pv.set.called
+        written_msg = mock_pv.set.call_args[0][0]
+        assert "Alert!" in written_msg
+        assert " - " in written_msg  # timestamp separator
+
+
+# ---------------------------------------------------------------------------
+# DeclarativeTask
+# ---------------------------------------------------------------------------
+
+class TestDeclarativeTask:
+
+    def test_declarative_task_is_taskbase(self):
+        from iocmng.declarative import DeclarativeTask
+        assert issubclass(DeclarativeTask, TaskBase)
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_declarative_task_runs_rules(self, mock_init, mock_put):
+        """DeclarativeTask should evaluate rules via _run_wrapper flow."""
+        from iocmng.declarative import DeclarativeTask
+        config = {
+            "parameters": {"interval": 0.01},
+            "arguments": {
+                "inputs": {
+                    "a": {"type": "int", "value": 0, "link": "EXT:A"},
+                },
+            },
+            "rule_defaults": {},
+            "rules": [
+                {"id": "R1", "condition": "a == 0", "actuators": {"a": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = DeclarativeTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task.link_values = {"a": 0}
+        task._evaluate_rules()
+
+        mock_put.assert_called_once()

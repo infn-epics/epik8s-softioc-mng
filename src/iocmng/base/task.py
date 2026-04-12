@@ -513,11 +513,16 @@ class TaskBase(ABC):
     def _evaluate_rules(self):
         """Evaluate all declarative rules against current link values.
 
-        Fires actuators and sets outputs for rules whose condition is met.
+        Applies ``rule_defaults`` first, then fires actuators and sets
+        outputs for rules whose condition is met.
         """
         rules = self.plugin_spec.rules
         if not rules:
             return
+
+        # Apply rule defaults before evaluation (reset phase)
+        for pv_name, value in self.plugin_spec.rule_defaults.items():
+            self.set_pv(pv_name, value)
 
         for rule in rules:
             try:
@@ -528,7 +533,12 @@ class TaskBase(ABC):
 
     def _fire_rule(self, rule: RuleSpec):
         """Execute the actions for a fired rule."""
-        self.logger.warning("Rule %s fired: %s", rule.id, rule.message)
+        now = datetime.datetime.now().strftime("%d/%m/%y %H:%M:%S")
+        msg = f"{now} - {rule.message}" if rule.message else ""
+        self.logger.warning("Rule %s fired: %s", rule.id, msg or "(no message)")
+        # Write timestamped message to a PV if configured
+        if rule.message_pv and msg:
+            self.set_pv(rule.message_pv, msg)
         # Set declared outputs
         for pv_name, value in rule.outputs.items():
             self.set_pv(pv_name, value)

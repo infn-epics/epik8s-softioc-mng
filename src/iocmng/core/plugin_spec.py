@@ -173,16 +173,19 @@ class RuleSpec:
     id: str
     condition: str
     message: str = ""
+    message_pv: Optional[str] = None
     actuators: Dict[str, Any] = field(default_factory=dict)
     outputs: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "RuleSpec":
         raw = _mapping(config)
+        msg_pv = raw.get("message_pv") or None
         return cls(
             id=str(raw.get("id", "")),
             condition=str(raw.get("condition", "False")),
             message=str(raw.get("message", "")),
+            message_pv=str(msg_pv) if msg_pv else None,
             actuators=_mapping(raw.get("actuators")),
             outputs=_mapping(raw.get("outputs")),
         )
@@ -191,6 +194,8 @@ class RuleSpec:
         d: Dict[str, Any] = {"id": self.id, "condition": self.condition}
         if self.message:
             d["message"] = self.message
+        if self.message_pv:
+            d["message_pv"] = self.message_pv
         if self.actuators:
             d["actuators"] = dict(self.actuators)
         if self.outputs:
@@ -207,6 +212,7 @@ class PluginSpec:
     inputs: Dict[str, PvArgumentSpec]
     outputs: Dict[str, PvArgumentSpec]
     rules: List[RuleSpec] = field(default_factory=list)
+    rule_defaults: Dict[str, Any] = field(default_factory=dict)
     raw_config: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -228,6 +234,9 @@ class PluginSpec:
             if isinstance(entry, Mapping):
                 rules.append(RuleSpec.from_config(entry))
 
+        # Rule defaults — output values applied before rule evaluation
+        rule_defaults = _mapping(raw_config.get("rule_defaults"))
+
         return cls(
             prefix=prefix,
             parameters=parameters,
@@ -240,6 +249,7 @@ class PluginSpec:
                 for name, spec in arguments["outputs"].items()
             },
             rules=rules,
+            rule_defaults=rule_defaults,
             raw_config=dict(raw_config),
         )
 

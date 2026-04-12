@@ -13,7 +13,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-from iocmng.core.plugin_spec import PluginSpec, create_softioc_record
+from iocmng.core.plugin_spec import PluginSpec, RuleSpec, create_softioc_record
+from iocmng.core.safe_eval import safe_eval
 
 
 class TaskBase(ABC):
@@ -105,18 +106,26 @@ class TaskBase(ABC):
             self.pv_prefix,
         )
 
-        # Task mode: 'continuous' (default) or 'triggered'
+        # Task mode: 'continuous' (default), 'triggered', or 'reactive'
         mode = self.parameters.get("mode") or (
             "triggered" if self.parameters.get("triggered") else "continuous"
         )
         self.mode = str(mode).lower() if isinstance(mode, str) else "continuous"
-        if self.mode not in ("continuous", "triggered"):
+        if self.mode not in ("continuous", "triggered", "reactive"):
             self.mode = "continuous"
 
         # Cycle counter
         self.cycle_count = 0
         self._trigger_thread = None
         self._thread: Optional[threading.Thread] = None
+
+        # ── Link state ───────────────────────────────────────────────
+        # Current values of all wired inputs, keyed by input name.
+        self.link_values: Dict[str, Any] = {}
+        # Previous values — used for trigger / on_input_changed detection.
+        self._link_prev: Dict[str, Any] = {}
+        # Per-input poll timers (for inputs with custom poll_rate).
+        self._link_poll_timers: Dict[str, float] = {}
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
         if controller_prefix:
@@ -164,7 +173,7 @@ class TaskBase(ABC):
                 initial_value=0,
                 on_update=lambda v: self._on_run_trigger(v),
             )
-        if self.mode == "continuous":
+        if self.mode in ("continuous", "reactive"):
             self.pvs["CYCLE_COUNT"] = builder.longIn("CYCLE_COUNT", initial_value=0)
 
         reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT"}
@@ -200,9 +209,18 @@ class TaskBase(ABC):
         self.set_status("RUN")
         self.set_message("Task running")
 
+        # Start link monitors for wired inputs with mode=monitor
+        self._start_link_monitors()
+
         if self.mode == "continuous":
             self._thread = threading.Thread(
                 target=self._run_wrapper, name=f"task-{self.name}", daemon=True
+            )
+            self._thread.start()
+        elif self.mode == "reactive":
+            # Reactive: no polling loop.  Heartbeat thread for cycle count.
+            self._thread = threading.Thread(
+                target=self._reactive_heartbeat, name=f"task-{self.name}-heartbeat", daemon=True
             )
             self._thread.start()
         else:
@@ -212,6 +230,8 @@ class TaskBase(ABC):
     def _run_wrapper(self):
         try:
             while self.running and self.enabled:
+                self._poll_links()
+                self._evaluate_rules()
                 self.execute()
                 self.step_cycle()
                 interval = self.parameters.get("interval", 1.0)
@@ -222,10 +242,21 @@ class TaskBase(ABC):
             self.set_message(f"Error: {str(e)}")
             self.running = False
 
+    def _reactive_heartbeat(self):
+        """Background thread for reactive mode — updates cycle count."""
+        interval = self.parameters.get("interval", 1.0)
+        try:
+            while self.running and self.enabled:
+                self.step_cycle()
+                time.sleep(interval)
+        except Exception as e:
+            self.logger.error(f"Reactive heartbeat error: {e}", exc_info=True)
+
     def stop(self):
         """Stop the task gracefully."""
         self.logger.info(f"Stopping task: {self.name}")
         self.running = False
+        self._stop_link_monitors()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=10)
         self.set_status("END")
@@ -284,7 +315,7 @@ class TaskBase(ABC):
     # ------------------------------------------------------------------
 
     def step_cycle(self):
-        if self.mode != "continuous":
+        if self.mode not in ("continuous", "reactive"):
             return
         self.cycle_count += 1
         if "CYCLE_COUNT" in self.pvs:
@@ -332,6 +363,163 @@ class TaskBase(ABC):
     def triggered(self):
         """Override to implement one-shot action for triggered mode."""
         pass
+
+    # ------------------------------------------------------------------
+    # Wired inputs — link engine
+    # ------------------------------------------------------------------
+
+    def _wired_inputs(self):
+        """Yield (name, spec) for inputs that have a link."""
+        for name, spec in self.plugin_spec.inputs.items():
+            if spec.wired:
+                yield name, spec
+
+    def _start_link_monitors(self):
+        """Set up pv_client monitors for wired inputs with mode=monitor."""
+        from iocmng.core import pv_client
+
+        for name, spec in self._wired_inputs():
+            # Initialise value cache
+            self.link_values[name] = spec.value
+            self._link_prev[name] = spec.value
+            if spec.link_mode == "monitor":
+                pv_client.monitor(
+                    spec.link,
+                    callback=self._make_link_callback(name, spec),
+                    name=f"_link_{name}",
+                )
+                self.logger.info("link monitor: %s -> %s", name, spec.link)
+
+    def _stop_link_monitors(self):
+        """Close all link monitors."""
+        from iocmng.core import pv_client
+
+        for name, spec in self._wired_inputs():
+            if spec.link_mode == "monitor":
+                pv_client.unmonitor(f"_link_{name}")
+
+    def _make_link_callback(self, name, spec):
+        """Return a monitor callback for the given wired input."""
+        def _cb(value):
+            old = self.link_values.get(name)
+            self.link_values[name] = value
+            # Update local PV mirror if it exists
+            if name in self.pvs:
+                try:
+                    self.pvs[name].set(value)
+                except Exception:
+                    pass
+            if spec.trigger and value != old:
+                self._link_prev[name] = old
+                try:
+                    self.on_input_changed(name, value, old)
+                except Exception as exc:
+                    self.logger.error("on_input_changed(%s) error: %s", name, exc)
+                # Reactive mode: also evaluate rules on trigger
+                if self.mode == "reactive":
+                    self._evaluate_rules()
+        return _cb
+
+    def _poll_links(self):
+        """Read wired inputs with mode=poll (called from _run_wrapper)."""
+        from iocmng.core import pv_client
+
+        timeout = float(self.parameters.get("timeout", 5.0))
+        now = time.monotonic()
+
+        for name, spec in self._wired_inputs():
+            if spec.link_mode != "poll":
+                continue
+            # Per-input poll rate gating
+            if spec.poll_rate is not None:
+                last = self._link_poll_timers.get(name)
+                if last is not None and (now - last) < spec.poll_rate:
+                    continue
+                self._link_poll_timers[name] = now
+            try:
+                value = pv_client.get(spec.link, timeout=timeout)
+            except Exception as exc:
+                self.logger.warning("link poll failed: %s (%s): %s", name, spec.link, exc)
+                continue
+            old = self.link_values.get(name)
+            self.link_values[name] = value
+            # Update local PV mirror
+            if name in self.pvs:
+                try:
+                    self.pvs[name].set(value)
+                except Exception:
+                    pass
+            if spec.trigger and value != old:
+                self._link_prev[name] = old
+                try:
+                    self.on_input_changed(name, value, old)
+                except Exception as exc:
+                    self.logger.error("on_input_changed(%s) error: %s", name, exc)
+
+    def link_put(self, key: str, value: Any, timeout: float = 5.0):
+        """Write a value to the external PV of a wired input.
+
+        This is the primary way for task code to actuate an external PV
+        declared as a wired input.
+
+        Args:
+            key: The input name (must have a ``link``).
+            value: The value to write.
+            timeout: CA/PVA put timeout.
+
+        Raises:
+            KeyError: if the input does not exist or is not wired.
+        """
+        from iocmng.core import pv_client
+
+        spec = self.plugin_spec.inputs.get(key)
+        if spec is None or not spec.wired:
+            raise KeyError(f"Input {key!r} is not a wired input")
+        pv_client.put(spec.link, value, timeout=timeout)
+        self.logger.debug("link_put(%s, %s) -> %s", key, value, spec.link)
+
+    def on_input_changed(self, key: str, value: Any, old_value: Any):
+        """Hook called when a wired input with trigger=true changes value.
+
+        Override in subclasses to react to individual input changes.
+        The default implementation does nothing.
+        """
+        pass
+
+    # ------------------------------------------------------------------
+    # Declarative rule evaluation
+    # ------------------------------------------------------------------
+
+    def _evaluate_rules(self):
+        """Evaluate all declarative rules against current link values.
+
+        Fires actuators and sets outputs for rules whose condition is met.
+        """
+        rules = self.plugin_spec.rules
+        if not rules:
+            return
+
+        for rule in rules:
+            try:
+                if safe_eval(rule.condition, dict(self.link_values)):
+                    self._fire_rule(rule)
+            except Exception as exc:
+                self.logger.error("Rule %s eval error: %s", rule.id, exc)
+
+    def _fire_rule(self, rule: RuleSpec):
+        """Execute the actions for a fired rule."""
+        self.logger.warning("Rule %s fired: %s", rule.id, rule.message)
+        # Set declared outputs
+        for pv_name, value in rule.outputs.items():
+            self.set_pv(pv_name, value)
+        # Fire actuators (write to external wired PVs)
+        timeout = float(self.parameters.get("timeout", 5.0))
+        for key, value in rule.actuators.items():
+            try:
+                self.link_put(key, value, timeout=timeout)
+                self.logger.info("  actuator: %s -> %s", key, value)
+            except Exception as exc:
+                self.logger.error("  actuator %s failed: %s", key, exc)
 
     # ------------------------------------------------------------------
     # Utility helpers

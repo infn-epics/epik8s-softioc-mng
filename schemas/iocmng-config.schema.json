@@ -17,9 +17,9 @@
       "properties": {
         "mode": {
           "type": "string",
-          "enum": ["continuous", "triggered"],
+          "enum": ["continuous", "triggered", "reactive"],
           "default": "continuous",
-          "description": "Task execution mode. 'continuous' runs execute() in a loop; 'triggered' waits for RUN PV."
+          "description": "Task execution mode. 'continuous' runs execute() in a loop; 'triggered' waits for RUN PV; 'reactive' fires on_input_changed() when monitored wired inputs change."
         },
         "interval": {
           "type": "number",
@@ -54,13 +54,33 @@
       "properties": {
         "inputs": {
           "$ref": "#/$defs/pvGroup",
-          "description": "PVs that external clients can write to (aOut, stringOut, boolOut, longOut)."
+          "description": "PVs that external clients can write to (aOut, stringOut, boolOut, longOut). Inputs can optionally be *wired* to an external PV via the 'link' field."
         },
         "outputs": {
           "$ref": "#/$defs/pvGroup",
           "description": "PVs that the task/job writes to (aIn, stringIn, boolIn, longIn)."
         }
       }
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Preferred alias for 'pvs'. PV definitions divided into inputs and outputs.",
+      "additionalProperties": false,
+      "properties": {
+        "inputs": {
+          "$ref": "#/$defs/pvGroup",
+          "description": "PVs writable by external clients or wired to external PVs."
+        },
+        "outputs": {
+          "$ref": "#/$defs/pvGroup",
+          "description": "PVs that the task/job writes to."
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "description": "Declarative logic rules evaluated each cycle against wired input values. When a rule condition is true, the framework fires actuators (writes to wired inputs) and sets outputs.",
+      "items": { "$ref": "#/$defs/ruleDefinition" }
     }
   },
   "$defs": {
@@ -98,7 +118,11 @@
           "description": "Display precision (decimal places)."
         },
         "low": { "type": "number", "description": "Lower operating range." },
-        "high": { "type": "number", "description": "Upper operating range." }
+        "high": { "type": "number", "description": "Upper operating range." },
+        "link": { "$ref": "#/$defs/linkProperties/link" },
+        "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
+        "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
       }
     },
     "pvInt": {
@@ -110,7 +134,11 @@
         "type": { "const": "int" },
         "value": { "type": "integer", "description": "Initial value." },
         "low": { "type": "integer", "description": "Lower operating range." },
-        "high": { "type": "integer", "description": "Upper operating range." }
+        "high": { "type": "integer", "description": "Upper operating range." },
+        "link": { "$ref": "#/$defs/linkProperties/link" },
+        "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
+        "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
       }
     },
     "pvString": {
@@ -120,7 +148,11 @@
       "additionalProperties": false,
       "properties": {
         "type": { "const": "string" },
-        "value": { "type": "string", "description": "Initial value." }
+        "value": { "type": "string", "description": "Initial value." },
+        "link": { "$ref": "#/$defs/linkProperties/link" },
+        "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
+        "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
       }
     },
     "pvBool": {
@@ -144,6 +176,75 @@
           "type": "string",
           "default": "On",
           "description": "Label for the one (true) state."
+        },
+        "link": { "$ref": "#/$defs/linkProperties/link" },
+        "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
+        "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
+      }
+    },
+    "linkProperties": {
+      "description": "Shared link field definitions for wired inputs.",
+      "link": {
+        "type": "string",
+        "description": "External PV name to wire this input to. When set, the framework automatically reads the PV and populates the local record."
+      },
+      "link_mode": {
+        "type": "string",
+        "enum": ["poll", "monitor"],
+        "default": "poll",
+        "description": "'poll' reads the PV once per cycle; 'monitor' attaches a persistent subscription."
+      },
+      "poll_rate": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Per-input poll rate in seconds. Defaults to the task interval. Only used with link_mode=poll."
+      },
+      "trigger": {
+        "type": "boolean",
+        "default": false,
+        "description": "If true, a value change fires on_input_changed(). In reactive mode, also triggers rule evaluation."
+      }
+    },
+    "ruleDefinition": {
+      "type": "object",
+      "description": "Declarative logic rule. Condition is a safe expression over input keys. When true, actuators write values to wired inputs and outputs set local PVs.",
+      "required": ["id", "condition"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique rule identifier."
+        },
+        "condition": {
+          "type": "string",
+          "description": "Safe expression evaluated over current input values. Supports comparisons (==, !=, <, >, <=, >=), boolean logic (and, or, not), and arithmetic (+, -, *, /)."
+        },
+        "message": {
+          "type": "string",
+          "description": "Log message emitted when the rule fires."
+        },
+        "actuators": {
+          "type": "object",
+          "description": "Map of input keys to values to write to their linked external PVs.",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "number" },
+              { "type": "string" },
+              { "type": "boolean" }
+            ]
+          }
+        },
+        "outputs": {
+          "type": "object",
+          "description": "Map of output PV names to values to set on the local soft IOC.",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "number" },
+              { "type": "string" },
+              { "type": "boolean" }
+            ]
+          }
         }
       }
     }

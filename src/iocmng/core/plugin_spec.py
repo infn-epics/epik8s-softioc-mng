@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
 VALID_PV_TYPES = {"float", "int", "string", "bool"}
+VALID_LINK_MODES = {"poll", "monitor"}
 
 
 def deep_merge_dicts(base: Optional[Mapping[str, Any]], override: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -58,7 +59,26 @@ def normalize_argument_sections(config: Optional[Mapping[str, Any]]) -> Dict[str
 
 @dataclass(frozen=True)
 class PvArgumentSpec:
-    """Normalized definition for a plugin input or output PV."""
+    """Normalized definition for a plugin input or output PV.
+
+    An input can be *wired* (linked to an external PV via ``link``) or
+    *unwired* (set by external EPICS clients — the default).  Wired inputs
+    are automatically read by the framework before each ``execute()`` cycle.
+
+    New fields (backward compatible — all default to ``None`` / ``False``):
+
+    link
+        External PV name.  ``None`` means unwired (current behaviour).
+    link_mode
+        ``"poll"`` (default) reads the PV once per cycle.
+        ``"monitor"`` attaches a persistent subscription.
+    poll_rate
+        Per-input poll rate in seconds.  ``None`` inherits the task
+        ``interval``.  Only used when ``link_mode == "poll"``.
+    trigger
+        If ``True``, a value change on this input fires
+        ``TaskBase.on_input_changed(key, value, old_value)``.
+    """
 
     name: str
     direction: str
@@ -70,6 +90,11 @@ class PvArgumentSpec:
     high: Any = 100
     znam: str = "Off"
     onam: str = "On"
+    # Link fields
+    link: Optional[str] = None
+    link_mode: str = "poll"
+    poll_rate: Optional[float] = None
+    trigger: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -78,6 +103,12 @@ class PvArgumentSpec:
         pv_type = str(raw.get("type", "float")).lower()
         if pv_type not in VALID_PV_TYPES:
             pv_type = "float"
+        link = raw.get("link") or None
+        link_mode = str(raw.get("link_mode", raw.get("mode", "poll"))).lower()
+        if link_mode not in VALID_LINK_MODES:
+            link_mode = "poll"
+        poll_rate_raw = raw.get("poll_rate")
+        poll_rate = float(poll_rate_raw) if poll_rate_raw is not None else None
         return cls(
             name=name,
             direction=direction,
@@ -89,12 +120,21 @@ class PvArgumentSpec:
             high=raw.get("high", 100),
             znam=str(raw.get("znam", "Off")),
             onam=str(raw.get("onam", "On")),
+            link=link,
+            link_mode=link_mode,
+            poll_rate=poll_rate,
+            trigger=bool(raw.get("trigger", False)),
             raw=dict(raw),
         )
 
     @property
     def writable(self) -> bool:
         return self.direction == "input"
+
+    @property
+    def wired(self) -> bool:
+        """True if this input is linked to an external PV."""
+        return self.link is not None
 
     def to_dict(self) -> Dict[str, Any]:
         normalized = dict(self.raw)
@@ -108,7 +148,54 @@ class PvArgumentSpec:
         if self.type == "bool":
             normalized.setdefault("znam", self.znam)
             normalized.setdefault("onam", self.onam)
+        if self.link:
+            normalized["link"] = self.link
+            normalized["link_mode"] = self.link_mode
+            if self.poll_rate is not None:
+                normalized["poll_rate"] = self.poll_rate
+            normalized["trigger"] = self.trigger
         return normalized
+
+
+# ── Declarative rule ─────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RuleSpec:
+    """A declarative interlock / logic rule evaluated by the framework.
+
+    ``condition`` is a safe expression string evaluated over current input
+    values (see :mod:`iocmng.core.safe_eval`).
+
+    ``actuators`` maps input keys to the value to write when the rule fires.
+    ``outputs`` maps output PV names to values to set locally.
+    """
+
+    id: str
+    condition: str
+    message: str = ""
+    actuators: Dict[str, Any] = field(default_factory=dict)
+    outputs: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> "RuleSpec":
+        raw = _mapping(config)
+        return cls(
+            id=str(raw.get("id", "")),
+            condition=str(raw.get("condition", "False")),
+            message=str(raw.get("message", "")),
+            actuators=_mapping(raw.get("actuators")),
+            outputs=_mapping(raw.get("outputs")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"id": self.id, "condition": self.condition}
+        if self.message:
+            d["message"] = self.message
+        if self.actuators:
+            d["actuators"] = dict(self.actuators)
+        if self.outputs:
+            d["outputs"] = dict(self.outputs)
+        return d
 
 
 @dataclass(frozen=True)
@@ -119,6 +206,7 @@ class PluginSpec:
     parameters: Dict[str, Any]
     inputs: Dict[str, PvArgumentSpec]
     outputs: Dict[str, PvArgumentSpec]
+    rules: List[RuleSpec] = field(default_factory=list)
     raw_config: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -132,6 +220,14 @@ class PluginSpec:
         arguments = normalize_argument_sections(raw_config)
         parameters = deep_merge_dicts(_mapping(raw_config.get("parameters")), parameters_override)
         prefix = raw_config.get("prefix") or default_prefix
+
+        # Parse declarative rules
+        raw_rules: Sequence[Any] = raw_config.get("rules") or []
+        rules: List[RuleSpec] = []
+        for entry in raw_rules:
+            if isinstance(entry, Mapping):
+                rules.append(RuleSpec.from_config(entry))
+
         return cls(
             prefix=prefix,
             parameters=parameters,
@@ -143,6 +239,7 @@ class PluginSpec:
                 name: PvArgumentSpec.from_config(name, "output", spec)
                 for name, spec in arguments["outputs"].items()
             },
+            rules=rules,
             raw_config=dict(raw_config),
         )
 

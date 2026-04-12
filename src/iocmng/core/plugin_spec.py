@@ -78,6 +78,10 @@ class PvArgumentSpec:
     trigger
         If ``True``, a value change on this input fires
         ``TaskBase.on_input_changed(key, value, old_value)``.
+    buffer_size
+        When set to a positive integer, the framework keeps a ring buffer
+        of the last *N* values.  The buffer is exposed as ``<name>_buf``
+        in the expression evaluation context used by rules and transforms.
     """
 
     name: str
@@ -95,6 +99,7 @@ class PvArgumentSpec:
     link_mode: str = "poll"
     poll_rate: Optional[float] = None
     trigger: bool = False
+    buffer_size: Optional[int] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -109,6 +114,8 @@ class PvArgumentSpec:
             link_mode = "poll"
         poll_rate_raw = raw.get("poll_rate")
         poll_rate = float(poll_rate_raw) if poll_rate_raw is not None else None
+        buf_raw = raw.get("buffer_size")
+        buffer_size = int(buf_raw) if buf_raw is not None and int(buf_raw) > 0 else None
         return cls(
             name=name,
             direction=direction,
@@ -124,6 +131,7 @@ class PvArgumentSpec:
             link_mode=link_mode,
             poll_rate=poll_rate,
             trigger=bool(raw.get("trigger", False)),
+            buffer_size=buffer_size,
             raw=dict(raw),
         )
 
@@ -154,6 +162,8 @@ class PvArgumentSpec:
             if self.poll_rate is not None:
                 normalized["poll_rate"] = self.poll_rate
             normalized["trigger"] = self.trigger
+        if self.buffer_size is not None:
+            normalized["buffer_size"] = self.buffer_size
         return normalized
 
 
@@ -203,6 +213,40 @@ class RuleSpec:
         return d
 
 
+# ── Declarative transform ────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class TransformSpec:
+    """A computed output evaluated each cycle.
+
+    ``expression`` is a safe expression string (supports registered
+    functions from :mod:`iocmng.core.functions`).  The result is
+    written to the ``output`` PV.
+
+    Example config::
+
+        transforms:
+          - output: avg_temp
+            expression: "mean(temp_buf)"
+          - output: alarm
+            expression: "1 if std(signal_buf) > threshold else 0"
+    """
+
+    output: str
+    expression: str
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> "TransformSpec":
+        raw = _mapping(config)
+        return cls(
+            output=str(raw.get("output", "")),
+            expression=str(raw.get("expression", "")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"output": self.output, "expression": self.expression}
+
+
 @dataclass(frozen=True)
 class PluginSpec:
     """Normalized plugin configuration consumed by tasks, jobs, and the controller."""
@@ -212,6 +256,7 @@ class PluginSpec:
     inputs: Dict[str, PvArgumentSpec]
     outputs: Dict[str, PvArgumentSpec]
     rules: List[RuleSpec] = field(default_factory=list)
+    transforms: List["TransformSpec"] = field(default_factory=list)
     rule_defaults: Dict[str, Any] = field(default_factory=dict)
     raw_config: Dict[str, Any] = field(default_factory=dict)
 
@@ -237,6 +282,13 @@ class PluginSpec:
         # Rule defaults — output values applied before rule evaluation
         rule_defaults = _mapping(raw_config.get("rule_defaults"))
 
+        # Parse declarative transforms
+        raw_transforms: Sequence[Any] = raw_config.get("transforms") or []
+        transforms: List[TransformSpec] = []
+        for entry in raw_transforms:
+            if isinstance(entry, Mapping):
+                transforms.append(TransformSpec.from_config(entry))
+
         return cls(
             prefix=prefix,
             parameters=parameters,
@@ -249,6 +301,7 @@ class PluginSpec:
                 for name, spec in arguments["outputs"].items()
             },
             rules=rules,
+            transforms=transforms,
             rule_defaults=rule_defaults,
             raw_config=dict(raw_config),
         )

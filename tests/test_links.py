@@ -775,3 +775,236 @@ class TestDeclarativeTask:
         task._evaluate_rules()
 
         mock_put.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Buffer size
+# ---------------------------------------------------------------------------
+
+class TestBufferSize:
+
+    def test_buffer_size_parsed(self):
+        spec = PvArgumentSpec.from_config("sig", "input", {
+            "type": "float", "value": 0.0, "link": "EXT:SIG",
+            "buffer_size": 100,
+        })
+        assert spec.buffer_size == 100
+
+    def test_buffer_size_none_by_default(self):
+        spec = PvArgumentSpec.from_config("sig", "input", {
+            "type": "float", "value": 0.0,
+        })
+        assert spec.buffer_size is None
+
+    def test_buffer_size_zero_is_none(self):
+        spec = PvArgumentSpec.from_config("sig", "input", {
+            "type": "float", "value": 0.0, "buffer_size": 0,
+        })
+        assert spec.buffer_size is None
+
+    @patch("iocmng.core.pv_client.init")
+    def test_init_buffers(self, mock_init):
+        config = {
+            "parameters": {},
+            "arguments": {
+                "inputs": {
+                    "sig": {"type": "float", "value": 0.0, "link": "EXT:SIG", "buffer_size": 10},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        assert "sig" in task._link_buffers
+        assert task._link_buffers["sig"].maxlen == 10
+
+    @patch("iocmng.core.pv_client.init")
+    def test_buffer_append(self, mock_init):
+        config = {
+            "parameters": {},
+            "arguments": {
+                "inputs": {
+                    "sig": {"type": "float", "value": 0.0, "link": "EXT:SIG", "buffer_size": 5},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        for i in range(7):
+            task._buffer_append("sig", float(i))
+
+        buf = list(task._link_buffers["sig"])
+        assert buf == [2.0, 3.0, 4.0, 5.0, 6.0]
+
+    @patch("iocmng.core.pv_client.init")
+    def test_build_eval_context_includes_buffers(self, mock_init):
+        config = {
+            "parameters": {"threshold": 5.0},
+            "arguments": {
+                "inputs": {
+                    "sig": {"type": "float", "value": 0.0, "link": "EXT:SIG", "buffer_size": 10},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task.link_values["sig"] = 3.0
+        task._buffer_append("sig", 1.0)
+        task._buffer_append("sig", 2.0)
+        task._buffer_append("sig", 3.0)
+
+        ctx = task._build_eval_context()
+        assert ctx["sig"] == 3.0
+        assert ctx["sig_buf"] == [1.0, 2.0, 3.0]
+        assert ctx["threshold"] == 5.0
+
+
+# ---------------------------------------------------------------------------
+# Transforms
+# ---------------------------------------------------------------------------
+
+class TestTransformSpec:
+
+    def test_transform_parsed(self):
+        from iocmng.core.plugin_spec import TransformSpec
+        t = TransformSpec.from_config({"output": "avg", "expression": "mean(sig_buf)"})
+        assert t.output == "avg"
+        assert t.expression == "mean(sig_buf)"
+
+    def test_transform_to_dict(self):
+        from iocmng.core.plugin_spec import TransformSpec
+        t = TransformSpec(output="avg", expression="mean(sig_buf)")
+        d = t.to_dict()
+        assert d == {"output": "avg", "expression": "mean(sig_buf)"}
+
+
+class TestTransformEvaluation:
+
+    @patch("iocmng.core.pv_client.init")
+    def test_evaluate_transforms_sets_output(self, mock_init):
+        config = {
+            "parameters": {},
+            "arguments": {
+                "inputs": {
+                    "sig": {"type": "float", "value": 0.0, "link": "EXT:SIG", "buffer_size": 10},
+                },
+                "outputs": {
+                    "avg": {"type": "float", "value": 0.0},
+                },
+            },
+            "transforms": [
+                {"output": "avg", "expression": "mean(sig_buf)"},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["avg"] = mock_pv
+
+        for v in [1.0, 2.0, 3.0]:
+            task._buffer_append("sig", v)
+
+        task._evaluate_transforms()
+
+        mock_pv.set.assert_called_once_with(2.0)
+
+    @patch("iocmng.core.pv_client.init")
+    def test_transforms_chained(self, mock_init):
+        """Later transforms can reference outputs of earlier transforms."""
+        config = {
+            "parameters": {},
+            "arguments": {
+                "inputs": {
+                    "x": {"type": "float", "value": 0.0, "link": "EXT:X"},
+                },
+                "outputs": {
+                    "doubled": {"type": "float", "value": 0.0},
+                    "tripled": {"type": "float", "value": 0.0},
+                },
+            },
+            "transforms": [
+                {"output": "doubled", "expression": "x * 2"},
+                {"output": "tripled", "expression": "doubled + x"},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.link_values["x"] = 5.0
+
+        mock_doubled = MagicMock()
+        mock_tripled = MagicMock()
+        task.pvs["doubled"] = mock_doubled
+        task.pvs["tripled"] = mock_tripled
+
+        task._evaluate_transforms()
+
+        mock_doubled.set.assert_called_once_with(10.0)
+        mock_tripled.set.assert_called_once_with(15.0)
+
+    @patch("iocmng.core.pv_client.init")
+    def test_transform_with_function(self, mock_init):
+        config = {
+            "parameters": {},
+            "arguments": {
+                "inputs": {
+                    "sig": {"type": "float", "value": 0.0, "link": "EXT:SIG", "buffer_size": 100},
+                },
+                "outputs": {
+                    "noise": {"type": "float", "value": 0.0},
+                },
+            },
+            "transforms": [
+                {"output": "noise", "expression": "std(sig_buf)"},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["noise"] = mock_pv
+
+        for v in [1.0, 1.0, 1.0]:
+            task._buffer_append("sig", v)
+
+        task._evaluate_transforms()
+        mock_pv.set.assert_called_once_with(0.0)
+
+    @patch("iocmng.core.pv_client.init")
+    def test_rules_see_eval_context(self, mock_init):
+        """Rules should have access to buffers and parameters."""
+        config = {
+            "parameters": {"threshold": 2.0},
+            "arguments": {
+                "inputs": {
+                    "sig": {"type": "float", "value": 0.0, "link": "EXT:SIG", "buffer_size": 10},
+                },
+                "outputs": {
+                    "alarm": {"type": "int", "value": 0},
+                },
+            },
+            "rules": [
+                {"id": "R1", "condition": "mean(sig_buf) > threshold", "outputs": {"alarm": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["alarm"] = mock_pv
+
+        for v in [3.0, 3.0, 3.0]:
+            task._buffer_append("sig", v)
+        task.link_values["sig"] = 3.0
+
+        task._evaluate_rules()
+
+        mock_pv.set.assert_called_once_with(1)

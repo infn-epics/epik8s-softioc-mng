@@ -81,6 +81,22 @@
       "type": "array",
       "description": "Declarative logic rules evaluated each cycle against wired input values. When a rule condition is true, the framework fires actuators (writes to wired inputs) and sets outputs.",
       "items": { "$ref": "#/$defs/ruleDefinition" }
+    },
+    "rule_defaults": {
+      "type": "object",
+      "description": "Map of output PV names to default values. Applied before rule evaluation each cycle (reset phase).",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "number" },
+          { "type": "string" },
+          { "type": "boolean" }
+        ]
+      }
+    },
+    "transforms": {
+      "type": "array",
+      "description": "Computed outputs evaluated each cycle. Each transform writes the result of an expression (which may call built-in functions like mean, std, sqrt) to an output PV.",
+      "items": { "$ref": "#/$defs/transformDefinition" }
     }
   },
   "$defs": {
@@ -122,7 +138,8 @@
         "link": { "$ref": "#/$defs/linkProperties/link" },
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
-        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
       }
     },
     "pvInt": {
@@ -138,7 +155,8 @@
         "link": { "$ref": "#/$defs/linkProperties/link" },
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
-        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
       }
     },
     "pvString": {
@@ -152,7 +170,8 @@
         "link": { "$ref": "#/$defs/linkProperties/link" },
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
-        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
       }
     },
     "pvBool": {
@@ -180,7 +199,8 @@
         "link": { "$ref": "#/$defs/linkProperties/link" },
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
-        "trigger": { "$ref": "#/$defs/linkProperties/trigger" }
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
       }
     },
     "linkProperties": {
@@ -204,6 +224,11 @@
         "type": "boolean",
         "default": false,
         "description": "If true, a value change fires on_input_changed(). In reactive mode, also triggers rule evaluation."
+      },
+      "buffer_size": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "When set, keeps a ring buffer of the last N values. Accessible in expressions as <name>_buf."
       }
     },
     "ruleDefinition": {
@@ -218,11 +243,15 @@
         },
         "condition": {
           "type": "string",
-          "description": "Safe expression evaluated over current input values. Supports comparisons (==, !=, <, >, <=, >=), boolean logic (and, or, not), and arithmetic (+, -, *, /)."
+          "description": "Safe expression evaluated over current input values. Supports comparisons (==, !=, <, >, <=, >=), boolean logic (and, or, not), arithmetic (+, -, *, /), and registered function calls (mean, std, sqrt, etc.)."
         },
         "message": {
           "type": "string",
           "description": "Log message emitted when the rule fires."
+        },
+        "message_pv": {
+          "type": "string",
+          "description": "Output PV name to write a timestamped message to when the rule fires."
         },
         "actuators": {
           "type": "object",
@@ -245,6 +274,22 @@
               { "type": "boolean" }
             ]
           }
+        }
+      }
+    },
+    "transformDefinition": {
+      "type": "object",
+      "description": "Computed output. The expression is evaluated each cycle and the result written to the named output PV. Expressions can reference input values, buffer arrays (<name>_buf), parameters, and registered functions (mean, std, sqrt, etc.).",
+      "required": ["output", "expression"],
+      "additionalProperties": false,
+      "properties": {
+        "output": {
+          "type": "string",
+          "description": "Name of the output PV to write the result to."
+        },
+        "expression": {
+          "type": "string",
+          "description": "Safe expression to evaluate. Example: 'mean(sig_buf)', 'sqrt(x) + y', 'clamp(temp, 0, 100)'."
         }
       }
     }

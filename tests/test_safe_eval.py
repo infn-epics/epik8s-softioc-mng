@@ -56,9 +56,13 @@ class TestSafeEval:
 class TestSafeEvalSecurity:
     """Verify that unsafe expressions are rejected."""
 
-    def test_function_call_rejected(self):
-        with pytest.raises(ValueError, match="Unsafe"):
+    def test_unregistered_function_rejected(self):
+        with pytest.raises(ValueError, match="not registered"):
             safe_eval("print('hello')", {})
+
+    def test_method_call_rejected(self):
+        with pytest.raises(ValueError, match="Unsafe"):
+            safe_eval("x.upper()", {"x": "hello"})
 
     def test_import_rejected(self):
         with pytest.raises(ValueError, match="Unsafe"):
@@ -83,3 +87,38 @@ class TestSafeEvalSecurity:
     def test_undefined_variable(self):
         with pytest.raises(NameError):
             safe_eval("unknown_var == 1", {})
+
+
+class TestSafeEvalFunctions:
+    """Verify that registered function calls work in safe_eval."""
+
+    def test_registered_function_allowed(self):
+        assert safe_eval("abs(x)", {"x": -5}) == 5
+
+    def test_mean_function(self):
+        result = safe_eval("mean(buf)", {"buf": [1, 2, 3, 4, 5]})
+        assert result == 3.0
+
+    def test_sqrt_in_expression(self):
+        result = safe_eval("sqrt(x) > 3", {"x": 16})
+        assert result is True
+
+    def test_nested_registered_functions(self):
+        result = safe_eval("round(sqrt(x))", {"x": 2})
+        assert result == 1
+
+    def test_function_in_condition(self):
+        assert safe_eval("mean(buf) > 0.5", {"buf": [0.1, 0.9, 0.8]}) is True
+
+    def test_clamp_function(self):
+        assert safe_eval("clamp(x, 0, 10)", {"x": 15}) == 10
+        assert safe_eval("clamp(x, 0, 10)", {"x": -5}) == 0
+        assert safe_eval("clamp(x, 0, 10)", {"x": 5}) == 5
+
+    def test_extra_functions(self):
+        custom = {"double": lambda x: x * 2}
+        assert safe_eval("double(x)", {"x": 5}, extra_functions=custom) == 10
+
+    def test_extra_function_unregistered_rejected(self):
+        with pytest.raises(ValueError, match="not registered"):
+            safe_eval("triple(x)", {"x": 5})

@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import Any, Dict, Optional
 
 from iocmng.core.plugin_spec import PluginSpec, RuleSpec, create_softioc_record
@@ -126,6 +127,9 @@ class TaskBase(ABC):
         self._link_prev: Dict[str, Any] = {}
         # Per-input poll timers (for inputs with custom poll_rate).
         self._link_poll_timers: Dict[str, float] = {}
+        # Ring buffers for inputs/outputs with buffer_size.
+        self._link_buffers: Dict[str, deque] = {}
+        self._init_buffers()
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
         if controller_prefix:
@@ -231,6 +235,7 @@ class TaskBase(ABC):
         try:
             while self.running and self.enabled:
                 self._poll_links()
+                self._evaluate_transforms()
                 self._evaluate_rules()
                 self.execute()
                 self.step_cycle()
@@ -374,6 +379,42 @@ class TaskBase(ABC):
         pass
 
     # ------------------------------------------------------------------
+    # Ring buffers & eval context
+    # ------------------------------------------------------------------
+
+    def _init_buffers(self):
+        """Create ring buffers for inputs/outputs with ``buffer_size``."""
+        for name, spec in list(self.plugin_spec.inputs.items()) + list(self.plugin_spec.outputs.items()):
+            if spec.buffer_size is not None:
+                self._link_buffers[name] = deque(maxlen=spec.buffer_size)
+
+    def _buffer_append(self, name: str, value: Any) -> None:
+        """Append *value* to the ring buffer for *name*, if one exists."""
+        buf = self._link_buffers.get(name)
+        if buf is not None:
+            try:
+                buf.append(float(value))
+            except (TypeError, ValueError):
+                buf.append(value)
+
+    def _build_eval_context(self) -> Dict[str, Any]:
+        """Build the variable dict for safe_eval (rules + transforms).
+
+        Contains:
+        - All ``link_values`` (latest scalar for each wired PV)
+        - ``<name>_buf`` for every ring buffer
+        - Numeric/string parameters (won't shadow existing names)
+        """
+        ctx: Dict[str, Any] = dict(self.link_values)
+        for name, buf in self._link_buffers.items():
+            ctx[f"{name}_buf"] = list(buf)
+        # Expose parameters that don't shadow inputs/outputs
+        for key, val in self.parameters.items():
+            if key not in ctx:
+                ctx[key] = val
+        return ctx
+
+    # ------------------------------------------------------------------
     # Wired inputs — link engine
     # ------------------------------------------------------------------
 
@@ -423,6 +464,7 @@ class TaskBase(ABC):
         def _cb(value):
             old = self.link_values.get(name)
             self.link_values[name] = value
+            self._buffer_append(name, value)
             # Update local PV mirror if it exists
             if name in self.pvs:
                 try:
@@ -435,8 +477,8 @@ class TaskBase(ABC):
                     self.on_input_changed(name, value, old)
                 except Exception as exc:
                     self.logger.error("on_input_changed(%s) error: %s", name, exc)
-                # Reactive mode: also evaluate rules on trigger
                 if self.mode == "reactive":
+                    self._evaluate_transforms()
                     self._evaluate_rules()
         return _cb
 
@@ -463,6 +505,7 @@ class TaskBase(ABC):
                 continue
             old = self.link_values.get(name)
             self.link_values[name] = value
+            self._buffer_append(name, value)
             # Update local PV mirror
             if name in self.pvs:
                 try:
@@ -507,8 +550,23 @@ class TaskBase(ABC):
         pass
 
     # ------------------------------------------------------------------
-    # Declarative rule evaluation
+    # Declarative transforms & rule evaluation
     # ------------------------------------------------------------------
+
+    def _evaluate_transforms(self):
+        """Evaluate all declarative transforms, writing results to outputs."""
+        transforms = self.plugin_spec.transforms
+        if not transforms:
+            return
+        ctx = self._build_eval_context()
+        for t in transforms:
+            try:
+                result = safe_eval(t.expression, ctx)
+                self.set_pv(t.output, result)
+                # Update context so later transforms can see earlier results
+                ctx[t.output] = result
+            except Exception as exc:
+                self.logger.error("Transform %s error: %s", t.output, exc)
 
     def _evaluate_rules(self):
         """Evaluate all declarative rules against current link values.
@@ -526,7 +584,7 @@ class TaskBase(ABC):
 
         for rule in rules:
             try:
-                if safe_eval(rule.condition, dict(self.link_values)):
+                if safe_eval(rule.condition, self._build_eval_context()):
                     self._fire_rule(rule)
             except Exception as exc:
                 self.logger.error("Rule %s eval error: %s", rule.id, exc)

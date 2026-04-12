@@ -176,7 +176,3 @@ def close() -> None:
             _context.close()
             _context = None
     logger.info("PV client closed")
-
-            _context.close()
-            _context = None
-    logger.info("PV client closed")

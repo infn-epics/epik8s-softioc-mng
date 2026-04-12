@@ -28,6 +28,7 @@ dependencies = [
     "softioc",
     "cothread",
     "p4p",
+    "pyepics",
 ]
 
 [project.optional-dependencies]

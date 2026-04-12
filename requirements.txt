@@ -16,6 +16,7 @@ cothread
 infn_ophyd_hal
 epik8s-tools
 p4p
+pyepics
 # Optional: Kubernetes integration
 # kubernetes
 

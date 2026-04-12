@@ -1,66 +1,48 @@
 # iocmng — IOC Manager Framework
 
-A pluggable task/job framework for IOC Manager applications. Provides base classes for continuous **tasks** and one-shot **jobs** that can be dynamically loaded at runtime via a REST API.
+A pluggable task/job framework for EPICS soft IOC applications on Kubernetes. Provides base classes for continuous **tasks** and one-shot **jobs**, a **declarative rule/transform engine**, and a **REST API** for dynamic plugin management at runtime.
 
-## Features
+## Key Features
 
-- **`TaskBase`** — base class for continuous tasks (run in a loop)
-- **`JobBase`** — base class for one-shot jobs (run once, return result)
-- **REST API** — add/remove tasks and jobs at runtime from git repositories
-- **Task startup metadata API** — inspect effective startup parameters and PV definitions for each loaded task
-- **Validation** — plugins are validated (must derive from base class, must compile, abstract methods must be implemented)
-- **EPICS soft IOC PVs** — every task and job gets default PVs (STATUS, MESSAGE, etc.) via `softioc`
-- **Per-plugin `config.yaml`** — each plugin defines its parameters and directional soft IOC arguments in a config file
-- **Path support** — specify a sub-directory inside the git repo where the plugin sources live
-- **Standalone local loading** — load plugins from a local directory for development or non-Helm execution
-- **Staged plugin path** — when `path` is provided only that sub-directory is stored under `IOCMNG_PLUGINS_DIR/<plugin-name>`
-- **Autostart persistence** — uploaded tasks can be persisted for automatic reload on IOC Manager startup
-- **Autostart ordering** — define deterministic startup order for autostart tasks
-- **On-disk plugin discovery** — `/api/v1/plugins` also reports plugin directories present on disk even when they are not loaded in memory
-- **Plugin `requirements.txt`** — plugins can ship their own dependencies
-- **Optional Ophyd integration** — device abstraction via `ophyd`/`infn_ophyd_hal` (optional dependency)
+- **`TaskBase`** — base class for continuous, triggered, or reactive tasks
+- **`JobBase`** — base class for one-shot jobs returning structured results
+- **`DeclarativeTask`** — zero-code tasks driven entirely by `config.yaml` rules and transforms
+- **Wired inputs/outputs** — automatically read/write external PVs (poll or monitor)
+- **Declarative rules** — safe boolean expressions that fire actuators and set outputs
+- **Transforms** — computed outputs using built-in math/statistics/array functions
+- **Ring buffers** — `buffer_size` accumulates time-series data for signal processing
+- **Built-in function library** — `mean`, `std`, `sqrt`, `clamp`, `moving_avg`, `derivative`, and more
+- **Safe expression evaluator** — AST-validated expressions; no arbitrary code execution
+- **REST API** — add/remove/restart plugins at runtime from git repos or local paths
+- **EPICS soft IOC PVs** — every task gets STATUS, MESSAGE, ENABLE, CYCLE_COUNT PVs
+- **Per-plugin `config.yaml`** — parameters, directional PVs, rules, transforms in one file
+- **PV client abstraction** — transparent PVA (p4p) or CA (PyEPICS) access
+- **Plugin validation** — syntax, inheritance, abstract methods checked before acceptance
 - **Docker image** — ready-to-run container with the REST API
-- **PyPI package** — `pip install iocmng`
+- **Standalone runner** — `iocmng-run` for local development without a server
+- **Optional Ophyd** — device abstraction via `ophyd`/`infn_ophyd_hal`
 
 ## Quick Start
 
-### Install from PyPI
+### Install
 
 ```bash
 pip install iocmng
 
-# With all optional dependencies (ophyd, kubernetes)
+# With all optional dependencies
 pip install iocmng[all]
 ```
 
 ### Run the API Server
 
 ```bash
-# Using the CLI entry point
 iocmng-server
 
-# Explicit standalone alias
-iocmng-standalone
-
-# Or with environment variables
-IOCMNG_PORT=8080 IOCMNG_LOG_LEVEL=debug IOCMNG_PREFIX=SPARC:CONTROL iocmng-server
-
-# Or with Docker
-docker run -p 8080:8080 ghcr.io/infn-epics/epik8s-beamline-controller:latest
+# With configuration
+IOCMNG_PORT=8080 IOCMNG_PREFIX=SPARC:CONTROL iocmng-server
 ```
 
-### Create a Task
-
-Create a git repository with:
-1. A Python file with a class deriving from `TaskBase`
-2. A `config.yaml` defining parameters and input/output arguments
-
-```
-my-monitor-repo/
-├── my_monitor.py
-├── config.yaml
-└── requirements.txt    # optional — extra dependencies
-```
+### Create a Task (Python)
 
 **my_monitor.py**
 ```python
@@ -71,16 +53,12 @@ class MyMonitor(TaskBase):
         self.logger.info("Starting monitor")
 
     def execute(self):
-        value = self.read_sensor()
-        self.set_pv("READING", value)
-        if value > self.parameters.get("threshold", 75):
+        value = self.get_pv("READING")
+        if value and value > self.parameters.get("threshold", 75):
             self.set_pv("ALARM", 1)
 
     def cleanup(self):
-        self.logger.info("Stopping monitor")
-
-    def read_sensor(self):
-        return 42.0
+        pass
 ```
 
 **config.yaml**
@@ -103,8 +81,6 @@ arguments:
     READING:
       type: float
       value: 0.0
-      unit: "arb"
-      prec: 3
     ALARM:
       type: bool
       value: 0
@@ -112,365 +88,156 @@ arguments:
       onam: "ALARM"
 ```
 
-### Create a Job
+### Create a Declarative Task (Zero Code)
 
+No Python needed — all logic lives in `config.yaml`:
+
+**my_interlock.py**
 ```python
-# my_diagnostics.py
-from iocmng import JobBase
-from iocmng.base.job import JobResult
+from iocmng import DeclarativeTask
 
-class MyDiagnostics(JobBase):
-    def initialize(self):
-        self.logger.info("Preparing diagnostics")
-
-    def execute(self) -> JobResult:
-        info = {"status": "healthy", "uptime": 12345}
-        self.set_pv("SYSTEM_NAME", info["status"])
-        return JobResult(success=True, data=info, message="Diagnostics OK")
+class MyInterlock(DeclarativeTask):
+    pass
 ```
 
-### REST API Usage
+**config.yaml**
+```yaml
+parameters:
+  mode: continuous
+  interval: 1.0
+  pva: false
 
-#### Add a plugin (task or job — type auto-detected)
+arguments:
+  inputs:
+    temp:
+      type: float
+      value: 0.0
+      link: "DEVICE:TEMP"         # Wired to external PV
+      buffer_size: 100            # Keep last 100 readings
+    pressure:
+      type: float
+      value: 0.0
+      link: "DEVICE:PRESSURE"
+  outputs:
+    avg_temp:
+      type: float
+      value: 0.0
+    alarm:
+      type: bool
+      value: 0
+      znam: "OK"
+      onam: "ALARM"
+
+transforms:
+  - output: avg_temp
+    expression: "mean(temp_buf)"
+
+rule_defaults:
+  alarm: 0
+
+rules:
+  - id: OVER_TEMP
+    condition: "mean(temp_buf) > 80 or pressure > 2.0"
+    message: "Temperature or pressure limit exceeded"
+    outputs:
+      alarm: 1
+```
+
+### Run Standalone (no server)
+
 ```bash
-curl -X POST http://sparc-beamline-controller.k8sda.lnf.infn.it/api/v1/plugins \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-monitor",
-    "git_url": "https://baltig.infn.it/lnf-da-control/epik8-sparc.git",
-    "pat": "",
-    "branch": "main",
-    "path": "config/iocs/beamline-controller/check_motor_movement/",
-    "auto_start": true,
-    "auto_start_on_boot": true,
-    "autostart_order": 10,
-    "parameters": {"threshold": 80.0}
-  }'
+iocmng-run -m my_interlock --config config.yaml --prefix MY:IOC --name interlock
 ```
 
-The plugin type (task / job) is determined automatically from the class found in the repo. The `/tasks` and `/jobs` endpoints are still available as type-checked aliases.
-
-For standalone local development, you can stage a plugin directly from the filesystem instead of cloning from git:
+### Deploy via REST API
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/plugins \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "my-monitor",
-    "local_path": "/absolute/path/to/my-monitor-plugin",
-    "auto_start": true,
-    "parameters": {"threshold": 80.0}
+    "name": "my-interlock",
+    "git_url": "https://github.com/org/my-tasks.git",
+    "path": "plugins/interlock/",
+    "auto_start": true
   }'
 ```
 
-#### Hot-reload a plugin (restart)
-```bash
-curl -X POST http://sparc-beamline-controller.k8sda.lnf.infn.it/api/v1/plugins/my-monitor/restart
-```
+## Documentation
 
-Re-clones the repository into a temporary directory, validates the new code, and only updates the running instance if all checks pass. The original branch and PAT are reused. If validation fails the running plugin is left untouched.
+| Document | Description |
+|----------|-------------|
+| [MANUAL.md](MANUAL.md) | Complete reference: architecture, API, configuration, all features |
+| [HOWTO.md](HOWTO.md) | Step-by-step recipes for common tasks |
+| [INSTALL.md](INSTALL.md) | Installation and environment setup |
 
-#### Run a job
-```bash
-curl -X POST http://localhost:8080/api/v1/plugins/my-monitor/run
-```
+## Task Modes
 
-#### Remove a plugin
-```bash
-curl -X DELETE http://localhost:8080/api/v1/plugins/my-monitor
-```
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `continuous` | `execute()` loops with `interval` sleep | Monitoring, polling, periodic updates |
+| `triggered` | `triggered()` called when `RUN` PV is written | Operator-driven actions from CS-Studio |
+| `reactive` | `on_input_changed()` fires on wired input change | Event-driven interlocks, fast response |
 
-#### List all plugins
-```bash
-curl http://localhost:8080/api/v1/plugins
+## Built-in Functions
 
-# Filter by type
-curl "http://localhost:8080/api/v1/plugins?type=task"
-curl "http://localhost:8080/api/v1/plugins?type=job"
-```
+Available in rule conditions and transform expressions:
 
-The unified plugin list includes:
+| Category | Functions |
+|----------|-----------|
+| **Math** | `abs`, `round`, `sqrt`, `log`, `exp`, `pow`, `floor`, `ceil`, `clamp` |
+| **Statistics** | `mean`, `std`, `variance`, `median`, `rms`, `min`, `max` |
+| **Logic** | `any_of`, `all_of`, `count_true` |
+| **Array** | `length`, `sum_of`, `diff`, `last`, `moving_avg`, `derivative` |
 
-- loaded plugins currently running or available in memory
-- plugin directories already present under `IOCMNG_PLUGINS_DIR`
-- per-plugin validation details and a `status` such as `running`, `loaded`, `available`, or `invalid`
-
-#### Type-scoped aliases
-```bash
-# Tasks
-curl -X POST   http://localhost:8080/api/v1/tasks
-curl -X DELETE http://localhost:8080/api/v1/tasks/my-monitor
-curl           http://localhost:8080/api/v1/tasks
-curl           http://localhost:8080/api/v1/tasks/my-monitor/startup
-
-# Jobs
-curl -X POST http://localhost:8080/api/v1/jobs
-curl -X POST http://localhost:8080/api/v1/jobs/my-diag/run
-curl -X DELETE http://localhost:8080/api/v1/jobs/my-diag
-```
-
-#### Get startup metadata for a task
-```bash
-curl http://localhost:8080/api/v1/tasks/my-monitor/startup
-```
-
-Example response:
-```json
-{
-  "name": "my-monitor",
-  "plugin_type": "task",
-  "auto_start": true,
-  "auto_start_on_boot": true,
-  "autostart_order": 10,
-  "plugin_prefix": "MY_MONITOR",
-  "start_parameters": {
-    "mode": "continuous",
-    "interval": 1.0,
-    "threshold": 80.0
-  },
-  "pv_definitions": {
-    "outputs": {
-      "VALUE": {"type": "float", "value": 0.0}
-    }
-  },
-  "built_pvs": ["ENABLE", "STATUS", "MESSAGE", "CYCLE_COUNT", "VALUE"]
-}
-```
-
-#### Health check
-```bash
-curl http://localhost:8080/api/v1/health
-```
-
-## Plugin Structure
-
-Each plugin lives in a git repository (or a sub-directory of one). The expected layout:
-
-```
-<repo-root>/
-└── <path>/                 # optional sub-directory (specified via REST "path" field)
-    ├── my_plugin.py        # Python module with TaskBase/JobBase subclass
-    ├── config.yaml         # Plugin configuration (PVs, parameters)
-    └── requirements.txt    # Optional additional pip dependencies
-```
-
-  If the REST request uses `path`, IOC Manager clones the repository into a temporary location, validates the selected sub-directory, and stores only that staged plugin directory under `IOCMNG_PLUGINS_DIR/<plugin-name>`. If a repository-level `requirements.txt` exists and the selected sub-directory does not provide its own, the requirements file is copied alongside the staged plugin so dependency installation still works.
-
-### config.yaml Format
-
-```yaml
-# Parameters — passed to the plugin constructor as self.parameters
-# REST-supplied parameters override these defaults
-parameters:
-  mode: continuous          # "continuous" or "triggered"
-  interval: 1.0             # application-specific
-  threshold: 75.0           # application-specific
-
-# Directional plugin arguments mapped to softIOC PVs
-# `arguments` is the preferred schema. Legacy `pvs` is still accepted.
-arguments:
-  inputs:                   # writable PVs (operator → plugin)
-    SETPOINT:
-      type: float           # float, int, string, bool
-      value: 50.0           # initial value
-      unit: "%"             # EGU (float only)
-      prec: 2               # precision (float only)
-      low: 0                # LOPR (float only)
-      high: 100             # HOPR (float only)
-  outputs:                  # read-only PVs (plugin → operator)
-    READING:
-      type: float
-      value: 0.0
-    ALARM:
-      type: bool
-      value: 0
-      znam: "OK"            # zero-state name (bool only)
-      onam: "ALARM"         # one-state name (bool only)
-```
-
-`config.yaml`, `config.yml`, and `config.json` are supported. The config file is structurally validated before the plugin is accepted.
-
-The standard contract is:
-
-- `parameters`: non-PV runtime settings exposed to the plugin as `self.parameters`
-- `arguments.inputs`: writable soft IOC PVs for operator or higher-level IOC input
-- `arguments.outputs`: read-only soft IOC PVs published by the plugin
-
-Legacy `pvs.inputs` and `pvs.outputs` are normalized into the same internal model for backward compatibility.
-
-You may also define an optional top-level `prefix` in the plugin config. This is the task/job-specific PV prefix segment appended to the controller prefix.
-
-Example:
-
-```yaml
-prefix: CHECK_MOTOR
-parameters:
-  mode: continuous
-```
-
-If the controller prefix is `SPARC:CONTROL`, the task PVs become:
-
-- `SPARC:CONTROL:CHECK_MOTOR:STATUS`
-- `SPARC:CONTROL:CHECK_MOTOR:MESSAGE`
-- `SPARC:CONTROL:CHECK_MOTOR:<CUSTOM_PV>`
-
-If `prefix` is omitted, IOC Manager falls back to the plugin name uppercased.
-
-## Plugin Validation
-
-When a task or job is added, the framework performs the following checks:
-
-1. **Clone** — the git repository is cloned (with optional PAT for private repos)
-2. **Dependencies** — `requirements.txt` is installed if present (from `path` or repo root)
-3. **Config** — `config.yaml` is loaded from `path` to read standardized argument definitions and default parameters
-4. **Syntax** — Python files are parsed via AST for syntax errors
-5. **Import** — the module is imported to check for runtime import errors
-6. **Inheritance** — at least one class must derive from `TaskBase` or `JobBase`
-7. **Abstract methods** — all abstract methods (`initialize`, `execute`, `cleanup`) must be implemented
-
-If any check fails, the plugin is rejected and the error details are returned.
-
-## Task Startup Logging (AS Info)
-
-When a plugin is loaded and when a task starts, IOC Manager emits `INFO` log lines with effective metadata:
-
-- task name
-- plugin type
-- mode
-- PV prefix
-- effective start parameters
-- PV definitions
-- effective PV list
-
-Load-time example:
-
-```text
-AS_INFO_LOAD plugin=my-monitor type=task pv_prefix=SPARC:CONTROL:CHECK_MOTOR parameters={'interval': 1.0, 'threshold': 80.0} pv_definitions={'outputs': {'VALUE': {'type': 'float', 'value': 0.0}}} built_pvs=['ENABLE', 'STATUS', 'MESSAGE', 'CYCLE_COUNT', 'VALUE']
-```
-
-Example log line:
-
-```text
-AS_INFO task=my-monitor mode=continuous pv_prefix=SPARC:CONTROL:MY-MONITOR parameters={'interval': 1.0, 'threshold': 80.0} pv_definitions={'outputs': {'VALUE': {'type': 'float', 'value': 0.0}}}
-```
+Extend with `register("my_fn", callable)` from `iocmng.core.functions`.
 
 ## Default PVs
 
-Every task automatically gets these PVs (prefix: `BEAMLINE:NAMESPACE:TASKNAME`):
+Every task automatically gets:
 
 | PV | Type | Description |
-|---|---|---|
+|----|------|-------------|
 | `ENABLE` | boolOut | Enable/disable the task |
 | `STATUS` | mbbIn | INIT / RUN / PAUSED / END / ERROR |
-| `MESSAGE` | stringIn | Human-readable status message |
-| `CYCLE_COUNT` | longIn | Cycle counter (continuous mode) |
+| `MESSAGE` | stringIn | Human-readable status |
+| `CYCLE_COUNT` | longIn | Cycle counter |
 | `RUN` | boolOut | Trigger execution (triggered mode) |
 
-Every job gets:
-
-| PV | Type | Description |
-|---|---|---|
-| `STATUS` | mbbIn | IDLE / RUNNING / SUCCESS / FAILED |
-| `MESSAGE` | stringIn | Human-readable status message |
-
-Additional PVs are created from the normalized `arguments` section of `config.yaml`.
-
-## Choosing Between Continuous Task, Triggered Task, and Job
-
-| | **Continuous Task** | **Triggered Task** | **Job** |
-|---|---|---|---|
-| **Execution** | `execute()` loops indefinitely | `execute()` called when `RUN` PV is written | `execute()` called via REST |
-| **How triggered** | Automatic (runs on start) | Operator writes `1` to the `RUN` EPICS PV | `POST /api/v1/jobs/{name}/run` |
-| **Return value** | None (side effects only) | None (side effects only) | `JobResult` with `success`, `data`, `message` |
-| **Has `cleanup()`** | Yes | Yes | No |
-| **EPICS PV** | `CYCLE_COUNT` | `RUN` (boolOut) | — |
-| **Typical use** | Polling, monitoring, periodic updates | Operator-driven actions from CS-Studio/Phoebus | API-driven actions from scripts or services |
-
-**Rule of thumb:**
-- Use a **continuous task** for anything that needs to run on a regular cycle (e.g., reading a sensor every second).
-- Use a **triggered task** when the action is initiated from the EPICS control system (e.g., an operator clicks a button in Phoebus that writes to a PV).
-- Use a **job** when the action is initiated from software/REST (e.g., a Kubernetes CronJob, a CI script, or another microservice).
-
-## Configuration
-
-### Initial Plugins (`IOCMNG_PLUGINS_CONFIG`)
-
-Set `IOCMNG_PLUGINS_CONFIG` to a YAML file path to pre-load plugins on startup:
-
-```yaml
-# plugins.yaml
-plugins:
-  - name: beam-monitor
-    git_url: https://github.com/org/beamline-tasks.git
-    path: tasks/monitor          # sub-directory inside the repo
-    branch: main
-    pat: ghp_xxx                 # optional — for private repos
-    auto_start: true             # start immediately after load
-    auto_start_on_boot: true     # persist and reload on next IOCMNG start
-    autostart_order: 10          # lower starts first
-    parameters:
-      threshold: 80.0            # override config.yaml defaults
-
-  - name: daily-report
-    git_url: https://github.com/org/beamline-jobs.git
-    path: jobs/report
-    auto_start: false            # jobs default to false; tasks default to true
-
-  - name: local-monitor
-    local_path: /absolute/path/to/my-monitor-plugin
-    auto_start: true
-```
-
-```bash
-export IOCMNG_PLUGINS_CONFIG=/etc/iocmng/plugins.yaml
-iocmng-server
-
-# same runtime, explicit non-Helm/dev alias
-iocmng-standalone
-```
-
-Startup behavior details:
-
-- Entries from `IOCMNG_PLUGINS_CONFIG` are loaded at startup.
-- Tasks added via REST with `auto_start_on_boot=true` are persisted under `IOCMNG_PLUGINS_DIR/autostart_plugins.yaml` and auto-loaded on next startup.
-- If both sources define the same plugin `name`, the config-file entry wins and duplicates are skipped.
-- Startup loading is ordered by `autostart_order` (ascending), then by plugin name.
-- Failures are logged but do not prevent server startup.
-
-### Environment Variables
+## Environment Variables
 
 | Variable | Default | Description |
-|---|---|---|
-| `IOCMNG_CONFIG` | (none) | Path to config.yaml |
-| `IOCMNG_BEAMLINE_CONFIG` | (none) | Path to values.yaml |
-| `IOCMNG_PLUGINS_CONFIG` | (none) | Path to initial plugins YAML |
-| `IOCMNG_PLUGINS_DIR` | `/data/plugins` | Directory for cloned plugins |
-| `IOCMNG_PREFIX` | (none) | Override the controller PV prefix from config.yaml |
-| `IOCMNG_HOST` | `0.0.0.0` | Server bind address |
+|----------|---------|-------------|
+| `IOCMNG_PREFIX` | — | Controller PV prefix |
 | `IOCMNG_PORT` | `8080` | Server port |
-| `IOCMNG_DISABLE_OPHYD` | `true` | Skip ophyd initialization |
+| `IOCMNG_HOST` | `0.0.0.0` | Server bind address |
+| `IOCMNG_PLUGINS_DIR` | `/data/plugins` | Plugin clone directory |
+| `IOCMNG_PLUGINS_CONFIG` | — | Startup plugins YAML |
 | `IOCMNG_LOG_LEVEL` | `info` | Logging level |
-
-### Optional: Ophyd Device Integration
-
-When `ophyd` and `infn_ophyd_hal` are installed and `IOCMNG_DISABLE_OPHYD=false`, the controller automatically creates Ophyd device instances from your `values.yaml` IOC configuration. Tasks can access devices via `self.get_device()` and `self.list_devices()`.
+| `IOCMNG_PVA` | `true` | Use PVA (`true`) or CA (`false`) |
+| `IOCMNG_DISABLE_OPHYD` | `true` | Skip ophyd initialization |
 
 ## Project Structure
 
 ```
 src/iocmng/
-├── __init__.py           # Package entry: exports TaskBase, JobBase
+├── __init__.py           # Exports: TaskBase, JobBase, DeclarativeTask, pv_client, run_ioc
+├── declarative.py        # DeclarativeTask (zero-code tasks)
+├── runner.py             # Standalone CLI runner (iocmng-run)
 ├── base/
-│   ├── task.py           # TaskBase — continuous tasks with PV support
-│   └── job.py            # JobBase — one-shot jobs with PV support
+│   ├── task.py           # TaskBase — continuous/triggered/reactive tasks
+│   └── job.py            # JobBase — one-shot jobs
 ├── core/
 │   ├── controller.py     # Central plugin manager
-│   ├── loader.py         # Git clone + config loading + module loading
-│   └── validator.py      # Plugin validation
+│   ├── loader.py         # Git clone + config loading
+│   ├── validator.py      # Plugin validation
+│   ├── plugin_spec.py    # PvArgumentSpec, PluginSpec, RuleSpec, TransformSpec
+│   ├── safe_eval.py      # AST-validated expression evaluator
+│   ├── functions.py      # Built-in function registry
+│   └── pv_client.py      # PVA/CA abstraction layer
 ├── api/
-│   ├── app.py            # FastAPI application factory
-│   ├── models.py         # Pydantic request/response models
-│   └── routes.py         # REST API endpoints
+│   ├── app.py            # FastAPI application
+│   ├── routes.py         # REST endpoints
+│   └── models.py         # Pydantic models
 └── ophyd/
     └── factory.py        # Optional ophyd device creation
 ```
@@ -478,29 +245,11 @@ src/iocmng/
 ## Development
 
 ```bash
-# Install in editable mode with dev dependencies
 pip install -e ".[dev]"
-
-# Run tests
 pytest tests/ -v
-
-# Format
 black .
-
-# Lint
 flake8 .
 ```
-
-## GitHub Actions
-
-The workflow in `.github/workflows/release.yml` triggers on:
-- **Git tags** matching `v*` (e.g., `v2.0.0`)
-- **Manual dispatch** (workflow_dispatch)
-
-It will:
-1. Run tests
-2. Build and publish the Python package to PyPI
-3. Build and push a Docker image to GitHub Container Registry (ghcr.io)
 
 ## License
 

@@ -1,6 +1,6 @@
 # iocmng — Reference Manual
 
-**Version 2.4.3**
+**Version 2.7.x**
 
 ---
 
@@ -16,17 +16,19 @@
 8. [DeclarativeTask](#8-declarativetask)
 9. [Wired Inputs and Outputs](#9-wired-inputs-and-outputs)
 10. [Declarative Rules](#10-declarative-rules)
-11. [Transforms](#11-transforms)
-12. [Ring Buffers](#12-ring-buffers)
-13. [Built-in Function Library](#13-built-in-function-library)
-14. [Safe Expression Evaluator](#14-safe-expression-evaluator)
-15. [PV Client](#15-pv-client)
-16. [REST API Reference](#16-rest-api-reference)
-17. [Ophyd Device Integration](#17-ophyd-device-integration)
-18. [Plugin Validation](#18-plugin-validation)
-19. [PV Naming and Prefixes](#19-pv-naming-and-prefixes)
-20. [Environment Variables](#20-environment-variables)
-21. [JSON Schema](#21-json-schema)
+11. [Output Latch](#11-output-latch)
+12. [Connection Tracking](#12-connection-tracking)
+13. [Transforms](#13-transforms)
+14. [Ring Buffers](#14-ring-buffers)
+15. [Built-in Function Library](#15-built-in-function-library)
+16. [Safe Expression Evaluator](#16-safe-expression-evaluator)
+17. [PV Client](#17-pv-client)
+18. [REST API Reference](#18-rest-api-reference)
+19. [Ophyd Device Integration](#19-ophyd-device-integration)
+20. [Plugin Validation](#20-plugin-validation)
+21. [PV Naming and Prefixes](#21-pv-naming-and-prefixes)
+22. [Environment Variables](#22-environment-variables)
+23. [JSON Schema](#23-json-schema)
 
 ---
 
@@ -268,10 +270,10 @@ rules:
 
 | Type | softioc Record | Python Type | Properties |
 |------|---------------|-------------|------------|
-| `float` | `aOut` / `aIn` | `float` | `value`, `unit`, `prec`, `low`, `high` |
-| `int` | `longOut` / `longIn` | `int` | `value`, `low`, `high` |
+| `float` | `aOut` / `aIn` | `float` | `value`, `unit`, `prec`, `low`, `high`, `alarm_on` |
+| `int` | `longOut` / `longIn` | `int` | `value`, `low`, `high`, `alarm_on` |
 | `string` | `stringOut` / `stringIn` | `str` | `value` |
-| `bool` | `boolOut` / `boolIn` | `int` (0/1) | `value`, `znam`, `onam` |
+| `bool` | `boolOut` / `boolIn` | `int` (0/1) | `value`, `znam`, `onam`, `alarm_on` |
 
 ### PV Link Properties
 
@@ -282,6 +284,14 @@ rules:
 | `poll_rate` | float | — | Per-input poll interval (seconds) |
 | `trigger` | bool | `false` | Fire `on_input_changed()` on value change |
 | `buffer_size` | int | — | Ring buffer size (keep last N values) |
+
+### Output-only Properties
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `latch` | bool | `false` | Hold output value once set by a rule; released when `CLEAR` PV is written |
+| `latch_dir` | string | `"rise"` | Which transition latches: `"rise"` / `"0->1"` (default), `"fall"` / `"1->0"`, `"any"` |
+| `alarm_on` | string | `""` | EPICS alarm severity when output is active: `"MAJOR"` or `"MINOR"`. Bool → `OSV`; float/int → `HSV` |
 
 ---
 
@@ -353,6 +363,8 @@ The preferred way is to pass `plugin_spec` (a `PluginSpec` instance parsed from 
 | `running` | `bool` | Whether the task is running |
 | `enabled` | `bool` | Whether the task is enabled |
 | `cycle_count` | `int` | Cycle counter |
+| `_latched_outputs` | `set` | Set of output PV names currently latched |
+| `_link_connected` | `dict` | Per-port connection state (True = connected) |
 
 ### PV Access Methods
 
@@ -380,6 +392,25 @@ self.link_put(key: str, value: Any, timeout: float = 5.0)
 ```
 
 For wired outputs, `set_pv()` automatically forwards the value to the linked external PV.
+
+### System PVs
+
+Every task automatically gets these PVs (all prefixed with the task's full PV prefix):
+
+| PV | Type | Description |
+|----|------|-------------|
+| `ENABLE` | boolOut | Enable / disable the task. Polled each cycle to catch external CA/PVA writes. |
+| `STATUS` | mbbIn | `INIT` / `RUN` / `PAUSED` / `END` / `ERROR` |
+| `MESSAGE` | stringIn | Human-readable status (max 40 chars) |
+| `VERSION` | stringIn | Framework or plugin version string |
+| `CYCLE_COUNT` | longIn | Incremented each cycle (continuous / reactive modes) |
+| `RUN` | boolOut | Trigger one execution (triggered mode only) |
+| `CLEAR` | boolOut | Pulse-1 to release all latched outputs back to their `rule_defaults` value |
+| `RESET` | boolOut | Pulse-1 to clear latches + reset `CYCLE_COUNT` to 0 + re-run connectivity check |
+| `CONN_INP` | WaveformIn | Integer array: 1 = connected, 0 = disconnected, one element per wired input |
+| `CONN_OUT` | WaveformIn | Same as `CONN_INP` but for wired outputs |
+
+> `CLEAR` and `RESET` are polled on every loop iteration, so writes from any CA/PVA client are always observed.
 
 ### Lifecycle
 
@@ -598,21 +629,22 @@ rules:
 
 Each cycle (continuous mode) or each input change (reactive mode):
 
-1. **rule_defaults** are applied — all listed outputs are reset to their default values
+1. **rule_defaults** are applied — all listed outputs are reset to their default values.  
+   > **Latch exception**: outputs currently in `_latched_outputs` are **skipped** in this reset step. Their value is preserved until CLEAR or RESET is written.
 2. Rules are evaluated **in order** (top to bottom)
 3. For each rule whose `condition` is true:
    - Log message is emitted
-   - If `message_pv` is set, a timestamped message is written to that output PV
-   - `outputs` are written to local soft IOC PVs
+   - If `message_pv` is set, a timestamped message (truncated to 39 chars) is written to that output PV
+   - `outputs` are written to local soft IOC PVs; if an output has `latch: true` the framework checks `latch_dir` to decide whether to add it to `_latched_outputs` (see [§11 Output Latch](#11-output-latch))
    - `actuators` write values to external PVs of wired inputs
 
 ### Condition Expressions
 
-Conditions are [safe expressions](#14-safe-expression-evaluator) evaluated over:
+Conditions are [safe expressions](#16-safe-expression-evaluator) evaluated over:
 - All `link_values` (latest scalar for each wired PV)
 - All ring buffers as `<name>_buf` (list of floats)
 - All task parameters (if they don't shadow input names)
-- All [registered functions](#13-built-in-function-library)
+- All [registered functions](#15-built-in-function-library)
 
 Examples:
 ```
@@ -637,7 +669,90 @@ Examples:
 
 ---
 
-## 11. Transforms
+## 11. Output Latch
+
+The latch feature allows an output PV to **hold its fired value** across rule cycles, even when the triggering condition becomes false.  Without latch, rule_defaults resets the output every cycle; with latch, the output stays set until an operator writes `1` to the `CLEAR` or `RESET` system PV.
+
+### Configuration
+
+Add `latch: true` (and optionally `latch_dir`) to any output PV in the plugin config:
+
+```yaml
+outputs:
+  - name: ALARM
+    type: bool
+    latch: true          # hold value when rule fires
+    latch_dir: rise      # latch when value transitions 0→1 (default)
+    alarm_on: MAJOR      # set EPICS alarm severity when PV is 1
+  - name: WARN
+    type: bool
+    latch: true
+    latch_dir: fall      # latch when value transitions 1→0
+  - name: DEVIATION
+    type: float
+    latch: true
+    latch_dir: any       # latch whenever rule fires regardless of value
+```
+
+### `latch_dir` Values
+
+| Value | Aliases | Latches when… |
+|-------|---------|----------------|
+| `rise` | `0->1` | `bool(new_value)` is `True` (non-zero) — **default** |
+| `fall` | `1->0` | `bool(new_value)` is `False` (zero / False) |
+| `any`  | | Every time the rule fires the output |
+
+### Latch Lifecycle
+
+1. **Rule fires** → output written → if latch condition met, output name added to `_latched_outputs`.
+2. **Next cycle** → `rule_defaults` reset skips outputs in `_latched_outputs`; the output keeps its latched value.
+3. **Operator writes `1` to `CLEAR` PV** → all outputs in `_latched_outputs` are reset to their `rule_defaults` value; `_latched_outputs` is cleared.
+4. **Operator writes `1` to `RESET` PV** → does everything CLEAR does, plus resets `CYCLE_COUNT` to 0 and re-runs the initial connectivity check.
+
+### Inspecting Latch State
+
+```python
+# Inside a task method
+print(self._latched_outputs)   # set of output names currently latched
+```
+
+---
+
+## 12. Connection Tracking
+
+For each task that has wired inputs or outputs the framework automatically creates connection-tracking PVs that let operators and archiving systems monitor link health at a glance.
+
+### System PVs Created
+
+| PV | Type | Description |
+|----|------|-------------|
+| `CONN_INP` | WaveformIn (int) | Array of 0/1 values, one element per wired input; 1 = connected |
+| `CONN_OUT` | WaveformIn (int) | Array of 0/1 values, one element per wired output; 1 = connected |
+
+The array index matches the declaration order of the wired ports in the config file.
+
+### Connectivity Check
+
+At startup (and after any RESET pulse) the task calls `_initial_connectivity_check()` which:
+
+1. Attempts a `caget` or PVA `get` on each wired link.
+2. Records success / failure in `CONN_INP` / `CONN_OUT`.
+3. Logs a warning for every link that is not reachable.
+
+After startup, each reactive input's monitor callback updates the relevant entry in `CONN_INP` whenever the connection state changes.
+
+### Example
+
+For a task with wired inputs `pv_temp` and `pv_pressure` and wired output `heater`:
+
+```
+PREFIX:TASK:CONN_INP   →  [1, 0]   # pv_temp OK, pv_pressure not connected
+PREFIX:TASK:CONN_OUT   →  [1]      # heater OK
+```
+
+---
+
+## 13. Transforms
 
 Transforms are computed outputs evaluated each cycle. They run **before** rules, so rules can reference transform results.
 
@@ -677,7 +792,7 @@ _poll_links() → _evaluate_transforms() → _evaluate_rules() → execute()
 
 ---
 
-## 12. Ring Buffers
+## 14. Ring Buffers
 
 Ring buffers accumulate time-series data for use in transforms and rules.
 
@@ -726,7 +841,7 @@ The buffer variable `signal_buf` is a regular Python list, so it works with all 
 
 ---
 
-## 13. Built-in Function Library
+## 15. Built-in Function Library
 
 Functions are registered in `iocmng.core.functions` and available in all safe expressions (rules, transforms).
 
@@ -795,7 +910,7 @@ Register custom functions in your task's `initialize()` method, or in a module-l
 
 ---
 
-## 14. Safe Expression Evaluator
+## 16. Safe Expression Evaluator
 
 The `safe_eval` function evaluates Python expressions with strict AST validation. It is used for both rule conditions and transform expressions.
 
@@ -846,7 +961,7 @@ result = safe_eval(
 
 ---
 
-## 15. PV Client
+## 17. PV Client
 
 `pv_client` abstracts PV access over PVA (p4p) or CA (PyEPICS).
 
@@ -907,7 +1022,7 @@ class MyTask(TaskBase):
 
 ---
 
-## 16. REST API Reference
+## 18. REST API Reference
 
 Base URL: `http://<host>:<port>/api/v1`
 
@@ -993,7 +1108,7 @@ Either `git_url` or `local_path` is required (not both).
 
 ---
 
-## 17. Ophyd Device Integration
+## 19. Ophyd Device Integration
 
 When `ophyd` and `infn_ophyd_hal` are installed (`pip install iocmng[ophyd]`), tasks can interact with hardware devices through the Ophyd abstraction layer.
 
@@ -1043,7 +1158,7 @@ device = self.get_device("tml-ch1")
 
 ---
 
-## 18. Plugin Validation
+## 20. Plugin Validation
 
 When a plugin is added (via REST or startup config), the framework validates it:
 
@@ -1059,7 +1174,7 @@ If any check fails, the plugin is rejected with a descriptive error.
 
 ---
 
-## 19. PV Naming and Prefixes
+## 21. PV Naming and Prefixes
 
 PV names follow the pattern:
 
@@ -1084,7 +1199,7 @@ SPARC:CONTROL:CHECK_MOTOR:SHUTTER_CMD   (custom output)
 
 ---
 
-## 20. Environment Variables
+## 22. Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -1101,7 +1216,7 @@ SPARC:CONTROL:CHECK_MOTOR:SHUTTER_CMD   (custom output)
 
 ---
 
-## 21. JSON Schema
+## 23. JSON Schema
 
 The full JSON schema for `config.yaml` validation is at `schemas/iocmng-config.schema.json`.
 

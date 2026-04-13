@@ -8,15 +8,18 @@ A pluggable task/job framework for EPICS soft IOC applications on Kubernetes. Pr
 - **`JobBase`** — base class for one-shot jobs returning structured results
 - **`DeclarativeTask`** — zero-code tasks driven entirely by `config.yaml` rules and transforms
 - **Wired inputs/outputs** — automatically read/write external PVs (poll or monitor)
+- **Connection tracking** — `CONN_INP` / `CONN_OUT` waveform PVs show live CA/PVA connection state per port
 - **Declarative rules** — safe boolean expressions that fire actuators and set outputs
+- **Output latch** — `latch: true` holds an output value until an operator writes `CLEAR`; `latch_dir` selects which transition latches (rise / fall / any)
+- **ALARM severity** — `alarm_on: MAJOR|MINOR` wires EPICS alarm fields directly from config
 - **Transforms** — computed outputs using built-in math/statistics/array functions
 - **Ring buffers** — `buffer_size` accumulates time-series data for signal processing
 - **Built-in function library** — `mean`, `std`, `sqrt`, `clamp`, `moving_avg`, `derivative`, and more
 - **Safe expression evaluator** — AST-validated expressions; no arbitrary code execution
 - **REST API** — add/remove/restart plugins at runtime from git repos or local paths
-- **EPICS soft IOC PVs** — every task gets STATUS, MESSAGE, ENABLE, CYCLE_COUNT PVs
+- **EPICS soft IOC PVs** — every task gets STATUS, MESSAGE, ENABLE, VERSION, CYCLE_COUNT, CLEAR, RESET PVs
 - **Per-plugin `config.yaml`** — parameters, directional PVs, rules, transforms in one file
-- **PV client abstraction** — transparent PVA (p4p) or CA (PyEPICS) access
+- **PV client abstraction** — transparent PVA (p4p) or CA (PyEPICS) access; ENABLE/CLEAR/RESET polled each cycle to catch external writes
 - **Plugin validation** — syntax, inheritance, abstract methods checked before acceptance
 - **Docker image** — ready-to-run container with the REST API
 - **Standalone runner** — `iocmng-run` for local development without a server
@@ -113,11 +116,13 @@ arguments:
       type: float
       value: 0.0
       link: "DEVICE:TEMP"         # Wired to external PV
-      buffer_size: 100            # Keep last 100 readings
+      link_mode: monitor           # monitor pushes values; poll reads each cycle
+      buffer_size: 100             # Keep last 100 readings
     pressure:
       type: float
       value: 0.0
       link: "DEVICE:PRESSURE"
+      link_mode: monitor
   outputs:
     avg_temp:
       type: float
@@ -127,6 +132,9 @@ arguments:
       value: 0
       znam: "OK"
       onam: "ALARM"
+      latch: true                  # Hold value until CLEAR is written
+      latch_dir: "rise"            # Latch on 0→1 transition (default)
+      alarm_on: MAJOR              # EPICS ALARM severity when output is 1
 
 transforms:
   - output: avg_temp
@@ -197,11 +205,16 @@ Every task automatically gets:
 
 | PV | Type | Description |
 |----|------|-------------|
-| `ENABLE` | boolOut | Enable/disable the task |
+| `ENABLE` | boolOut | Enable/disable the task (readable and writable from any CA/PVA client) |
 | `STATUS` | mbbIn | INIT / RUN / PAUSED / END / ERROR |
 | `MESSAGE` | stringIn | Human-readable status |
-| `CYCLE_COUNT` | longIn | Cycle counter |
+| `VERSION` | stringIn | Framework or plugin version string |
+| `CYCLE_COUNT` | longIn | Cycle counter (continuous / reactive modes) |
 | `RUN` | boolOut | Trigger execution (triggered mode) |
+| `CLEAR` | boolOut | Release all latched outputs (write 1 to pulse) |
+| `RESET` | boolOut | Clear latches + reset cycle counter + re-init connectivity (write 1 to pulse) |
+| `CONN_INP` | WaveformIn | Per-port connection state for wired inputs (1=connected, 0=disconnected) |
+| `CONN_OUT` | WaveformIn | Per-port connection state for wired outputs |
 
 ## Environment Variables
 

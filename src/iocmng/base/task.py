@@ -145,6 +145,12 @@ class TaskBase(ABC):
         # when the rule condition that drives the output goes *false* for
         # one cycle, so a new rising-edge can re-arm the latch naturally.
         self._clear_inhibit: set = set()
+        # Pending CLEAR/RESET requests captured from control-PV callbacks.
+        # They are applied from the task thread to avoid cross-thread races
+        # with rule evaluation while still never missing short push pulses.
+        self._control_request_lock = threading.Lock()
+        self._pending_clear = False
+        self._pending_reset = False
         self._init_buffers()
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
@@ -202,16 +208,17 @@ class TaskBase(ABC):
             self.pvs["CYCLE_COUNT"] = builder.longIn("CYCLE_COUNT", initial_value=0)
 
         # CLEAR / RESET control PVs for latch support.
-        # No on_update callback — these are polled each cycle by
-        # _sync_control_pvs_from_pv() in the task thread to avoid
-        # cross-thread races with the rule evaluation loop.
+        # on_update captures short push-button pulses immediately;
+        # actual CLEAR/RESET processing is deferred to task thread.
         self.pvs["CLEAR"] = builder.boolOut(
             "CLEAR",
             initial_value=0,
+            on_update=lambda v: self._request_control_action("CLEAR", v),
         )
         self.pvs["RESET"] = builder.boolOut(
             "RESET",
             initial_value=0,
+            on_update=lambda v: self._request_control_action("RESET", v),
         )
 
         reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION", "CLEAR", "RESET"}
@@ -296,6 +303,7 @@ class TaskBase(ABC):
             while self.running:
                 self._sync_enable_state_from_pv()
                 self._sync_control_pvs_from_pv()
+                self._apply_pending_control_actions()
                 if not self.enabled:
                     time.sleep(0.1)
                     continue
@@ -319,6 +327,7 @@ class TaskBase(ABC):
             while self.running:
                 self._sync_enable_state_from_pv()
                 self._sync_control_pvs_from_pv()
+                self._apply_pending_control_actions()
                 if not self.enabled:
                     time.sleep(0.1)
                     continue
@@ -431,15 +440,47 @@ class TaskBase(ABC):
         not invoke the softioc ``on_update`` callback in this process.
         Reading the PV on every cycle ensures we never miss a pulse.
         """
-        for pv_name, handler in (("CLEAR", self._on_clear), ("RESET", self._on_reset)):
+        for pv_name in ("CLEAR", "RESET"):
             pv = self.pvs.get(pv_name)
             if pv is None:
                 continue
             try:
                 if bool(pv.get()):
-                    handler(1)
+                    self._request_control_action(pv_name, 1)
             except Exception:
                 pass
+        # Keep backward-compatible semantics: a direct call to this method
+        # should immediately execute pending CLEAR/RESET requests.
+        self._apply_pending_control_actions()
+
+    def _request_control_action(self, pv_name: str, value: Any):
+        """Capture CLEAR/RESET requests from callbacks or poll fallback."""
+        if not bool(value):
+            return
+        # Triggered mode has no run loop: apply immediately.
+        if self.mode == "triggered":
+            if pv_name == "RESET":
+                self._on_reset(1)
+            else:
+                self._on_clear(1)
+            return
+        with self._control_request_lock:
+            if pv_name == "RESET":
+                self._pending_reset = True
+            elif pv_name == "CLEAR":
+                self._pending_clear = True
+
+    def _apply_pending_control_actions(self):
+        """Apply queued CLEAR/RESET requests from task thread context."""
+        with self._control_request_lock:
+            do_reset = self._pending_reset
+            do_clear = self._pending_clear
+            self._pending_reset = False
+            self._pending_clear = False
+        if do_reset:
+            self._on_reset(1)
+        elif do_clear:
+            self._on_clear(1)
 
     def _on_clear(self, value):
         """Handle CLEAR PV write — release all latched outputs."""

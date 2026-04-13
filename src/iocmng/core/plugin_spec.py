@@ -101,6 +101,8 @@ class PvArgumentSpec:
     trigger: bool = False
     buffer_size: Optional[int] = None
     latch: bool = False
+    latch_dir: str = "rise"  # "rise" (0→1), "fall" (1→0), "any"
+    alarm_on: str = ""       # EPICS alarm severity when output is active: "MAJOR", "MINOR"
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -118,6 +120,13 @@ class PvArgumentSpec:
         buf_raw = raw.get("buffer_size")
         buffer_size = int(buf_raw) if buf_raw is not None and int(buf_raw) > 0 else None
         latch = bool(raw.get("latch", False))
+        latch_dir_raw = str(raw.get("latch_dir", "rise")).lower()
+        if latch_dir_raw not in ("rise", "fall", "any", "0->1", "1->0"):
+            latch_dir_raw = "rise"
+        # Normalise aliases
+        latch_dir = {"0->1": "rise", "1->0": "fall"}.get(latch_dir_raw, latch_dir_raw)
+        alarm_on_raw = str(raw.get("alarm_on", "")).upper()
+        alarm_on = alarm_on_raw if alarm_on_raw in ("MAJOR", "MINOR") else ""
         return cls(
             name=name,
             direction=direction,
@@ -135,6 +144,8 @@ class PvArgumentSpec:
             trigger=bool(raw.get("trigger", False)),
             buffer_size=buffer_size,
             latch=latch,
+            latch_dir=latch_dir,
+            alarm_on=alarm_on,
             raw=dict(raw),
         )
 
@@ -172,6 +183,10 @@ class PvArgumentSpec:
             normalized["buffer_size"] = self.buffer_size
         if self.latch:
             normalized["latch"] = True
+            if self.latch_dir != "rise":
+                normalized["latch_dir"] = self.latch_dir
+        if self.alarm_on:
+            normalized["alarm_on"] = self.alarm_on
         return normalized
 
 
@@ -355,14 +370,19 @@ def create_softioc_record(spec: PvArgumentSpec, on_update=None):
             LOPR=spec.low,
             HOPR=spec.high,
         )
+        if spec.alarm_on:
+            kwargs.update(HIGH=spec.high, HSV=spec.alarm_on)
         if spec.writable:
             return builder.aOut(spec.name, on_update=on_update, **kwargs)
         return builder.aIn(spec.name, **kwargs)
 
     if spec.type == "int":
+        kwargs = dict(initial_value=int(spec.value))
+        if spec.alarm_on:
+            kwargs.update(HIGH=int(spec.high), HSV=spec.alarm_on)
         if spec.writable:
-            return builder.longOut(spec.name, initial_value=int(spec.value), on_update=on_update)
-        return builder.longIn(spec.name, initial_value=int(spec.value))
+            return builder.longOut(spec.name, on_update=on_update, **kwargs)
+        return builder.longIn(spec.name, **kwargs)
 
     if spec.type == "string":
         if spec.writable:
@@ -375,6 +395,8 @@ def create_softioc_record(spec: PvArgumentSpec, on_update=None):
             ZNAM=spec.znam,
             ONAM=spec.onam,
         )
+        if spec.alarm_on:
+            kwargs["ONSV"] = spec.alarm_on
         if spec.writable:
             return builder.boolOut(spec.name, on_update=on_update, **kwargs)
         return builder.boolIn(spec.name, **kwargs)

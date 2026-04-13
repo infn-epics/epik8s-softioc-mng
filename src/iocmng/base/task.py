@@ -289,6 +289,7 @@ class TaskBase(ABC):
         try:
             while self.running:
                 self._sync_enable_state_from_pv()
+                self._sync_control_pvs_from_pv()
                 if not self.enabled:
                     time.sleep(0.1)
                     continue
@@ -311,6 +312,7 @@ class TaskBase(ABC):
         try:
             while self.running:
                 self._sync_enable_state_from_pv()
+                self._sync_control_pvs_from_pv()
                 if not self.enabled:
                     time.sleep(0.1)
                     continue
@@ -415,6 +417,23 @@ class TaskBase(ABC):
             return
         if current != self.enabled:
             self._on_enable_changed(current)
+
+    def _sync_control_pvs_from_pv(self):
+        """Poll CLEAR and RESET PVs each loop iteration.
+
+        External PVA/CA clients write the record value directly, which may
+        not invoke the softioc ``on_update`` callback in this process.
+        Reading the PV on every cycle ensures we never miss a pulse.
+        """
+        for pv_name, handler in (("CLEAR", self._on_clear), ("RESET", self._on_reset)):
+            pv = self.pvs.get(pv_name)
+            if pv is None:
+                continue
+            try:
+                if bool(pv.get()):
+                    handler(1)
+            except Exception:
+                pass
 
     def _on_clear(self, value):
         """Handle CLEAR PV write — release all latched outputs."""
@@ -855,8 +874,16 @@ class TaskBase(ABC):
             # won't reset it on subsequent evaluation cycles.
             spec = self.plugin_spec.outputs.get(pv_name)
             if spec is not None and spec.latch:
-                self._latched_outputs.add(pv_name)
-                self.logger.info("Output %s latched by rule %s", pv_name, rule.id)
+                latch_dir = spec.latch_dir  # "rise", "fall", "any"
+                if latch_dir == "any":
+                    should_latch = True
+                elif latch_dir == "fall":
+                    should_latch = not bool(value)
+                else:  # "rise" (default) — latch when rule drives output HIGH
+                    should_latch = bool(value)
+                if should_latch:
+                    self._latched_outputs.add(pv_name)
+                    self.logger.info("Output %s latched by rule %s (dir=%s)", pv_name, rule.id, latch_dir)
         # Fire actuators (write to external wired PVs)
         timeout = float(self.parameters.get("timeout", 5.0))
         for key, value in rule.actuators.items():

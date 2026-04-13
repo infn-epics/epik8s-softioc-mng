@@ -1700,3 +1700,302 @@ class TestLatchFeature:
         task.link_values = {"sensor": 1}
         task._evaluate_rules()
         mock_pv.set.assert_called_once_with(0)
+
+
+# ---------------------------------------------------------------------------
+# CLEAR/RESET sync from external PV client
+# ---------------------------------------------------------------------------
+
+class TestClearResetSync:
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_sync_control_pvs_fires_clear_when_pv_is_one(self, mock_init, mock_put):
+        """_sync_control_pvs_from_pv should invoke _on_clear when CLEAR PV is 1."""
+        config = {
+            "arguments": {
+                "outputs": {"ALARM": {"type": "bool", "value": 0, "latch": True}},
+            },
+            "rule_defaults": {"ALARM": 0},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task._latched_outputs.add("ALARM")
+        mock_alarm = MagicMock()
+        mock_clear = MagicMock()
+        mock_clear.get.return_value = 1
+        task.pvs["ALARM"] = mock_alarm
+        task.pvs["CLEAR"] = mock_clear
+        # RESET not present — should not raise
+        task.pvs.pop("RESET", None)
+
+        task._sync_control_pvs_from_pv()
+
+        assert len(task._latched_outputs) == 0
+        mock_clear.set.assert_called_with(0)  # auto-reset
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_sync_control_pvs_fires_reset_when_pv_is_one(self, mock_init, mock_put):
+        """_sync_control_pvs_from_pv should invoke _on_reset when RESET PV is 1."""
+        config = {
+            "parameters": {"mode": "continuous"},
+            "arguments": {
+                "outputs": {"ALARM": {"type": "bool", "value": 0, "latch": True}},
+            },
+            "rule_defaults": {"ALARM": 0},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task._latched_outputs.add("ALARM")
+        task.cycle_count = 99
+        mock_alarm = MagicMock()
+        mock_clear = MagicMock()
+        mock_reset = MagicMock()
+        mock_cycle = MagicMock()
+        mock_reset.get.return_value = 1
+        mock_clear.get.return_value = 0
+        task.pvs["ALARM"] = mock_alarm
+        task.pvs["CLEAR"] = mock_clear
+        task.pvs["RESET"] = mock_reset
+        task.pvs["CYCLE_COUNT"] = mock_cycle
+
+        with patch.object(task, "_initial_connectivity_check"):
+            task._sync_control_pvs_from_pv()
+
+        assert len(task._latched_outputs) == 0
+        assert task.cycle_count == 0
+        mock_reset.set.assert_called_with(0)
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_sync_control_pvs_ignores_zero_values(self, mock_init, mock_put):
+        """_sync_control_pvs_from_pv must not fire handlers when PVs are 0."""
+        config = {
+            "arguments": {
+                "outputs": {"ALARM": {"type": "bool", "value": 0, "latch": True}},
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task._latched_outputs.add("ALARM")
+        mock_clear = MagicMock()
+        mock_reset = MagicMock()
+        mock_clear.get.return_value = 0
+        mock_reset.get.return_value = 0
+        task.pvs["CLEAR"] = mock_clear
+        task.pvs["RESET"] = mock_reset
+
+        task._sync_control_pvs_from_pv()
+
+        assert "ALARM" in task._latched_outputs  # unchanged
+        mock_clear.set.assert_not_called()
+        mock_reset.set.assert_not_called()
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_run_wrapper_syncs_control_pvs(self, mock_init, mock_put):
+        """Continuous loop should call _sync_control_pvs_from_pv each iteration."""
+        config = {
+            "parameters": {"interval": 0.01, "mode": "continuous"},
+            "arguments": {"inputs": {"x": {"type": "int", "value": 0}}},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.running = True
+
+        sync_calls = {"n": 0}
+
+        original = task._sync_control_pvs_from_pv
+        def counting_sync():
+            sync_calls["n"] += 1
+            if sync_calls["n"] >= 2:
+                task.running = False
+
+        with patch.object(task, "_sync_enable_state_from_pv"), \
+             patch.object(task, "_sync_control_pvs_from_pv", side_effect=counting_sync), \
+             patch.object(task, "_poll_links"), \
+             patch.object(task, "_evaluate_transforms"), \
+             patch.object(task, "_evaluate_rules"), \
+             patch.object(task, "execute"), \
+             patch.object(task, "step_cycle"), \
+             patch("iocmng.base.task.time.sleep"):
+            task._run_wrapper()
+
+        assert sync_calls["n"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# alarm_on field
+# ---------------------------------------------------------------------------
+
+class TestAlarmOn:
+
+    def test_alarm_on_default_empty(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {"type": "bool", "value": 0})
+        assert spec.alarm_on == ""
+
+    def test_alarm_on_major(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "alarm_on": "MAJOR",
+        })
+        assert spec.alarm_on == "MAJOR"
+
+    def test_alarm_on_minor(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "alarm_on": "minor",
+        })
+        assert spec.alarm_on == "MINOR"
+
+    def test_alarm_on_invalid_ignored(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "alarm_on": "BAD",
+        })
+        assert spec.alarm_on == ""
+
+    def test_to_dict_includes_alarm_on(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "alarm_on": "MAJOR",
+        })
+        assert spec.to_dict()["alarm_on"] == "MAJOR"
+
+    def test_to_dict_omits_alarm_on_when_empty(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {"type": "bool", "value": 0})
+        assert "alarm_on" not in spec.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# latch_dir field
+# ---------------------------------------------------------------------------
+
+class TestLatchDir:
+
+    def test_latch_dir_default_rise(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True,
+        })
+        assert spec.latch_dir == "rise"
+
+    def test_latch_dir_fall(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True, "latch_dir": "fall",
+        })
+        assert spec.latch_dir == "fall"
+
+    def test_latch_dir_any(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True, "latch_dir": "any",
+        })
+        assert spec.latch_dir == "any"
+
+    def test_latch_dir_alias_0_to_1(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True, "latch_dir": "0->1",
+        })
+        assert spec.latch_dir == "rise"
+
+    def test_latch_dir_alias_1_to_0(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True, "latch_dir": "1->0",
+        })
+        assert spec.latch_dir == "fall"
+
+    def test_to_dict_omits_latch_dir_when_default(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True,
+        })
+        assert "latch_dir" not in spec.to_dict()
+
+    def test_to_dict_includes_latch_dir_when_non_default(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True, "latch_dir": "fall",
+        })
+        assert spec.to_dict()["latch_dir"] == "fall"
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_latch_rise_latches_when_value_is_one(self, mock_init, mock_put):
+        config = {
+            "arguments": {
+                "inputs": {"sensor": {"type": "int", "value": 0, "link": "EXT:S"}},
+                "outputs": {"ALARM": {"type": "bool", "value": 0, "latch": True, "latch_dir": "rise"}},
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [{"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}}],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.pvs["ALARM"] = MagicMock()
+
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_latch_rise_does_not_latch_when_value_is_zero(self, mock_init, mock_put):
+        """Rule setting output to 0 with latch_dir=rise should NOT latch."""
+        config = {
+            "arguments": {
+                "inputs": {"sensor": {"type": "int", "value": 0, "link": "EXT:S"}},
+                "outputs": {"ALARM": {"type": "bool", "value": 1, "latch": True, "latch_dir": "rise"}},
+            },
+            "rule_defaults": {"ALARM": 1},
+            "rules": [{"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 0}}],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.pvs["ALARM"] = MagicMock()
+
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" not in task._latched_outputs
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_latch_fall_latches_when_value_is_zero(self, mock_init, mock_put):
+        config = {
+            "arguments": {
+                "inputs": {"sensor": {"type": "int", "value": 0, "link": "EXT:S"}},
+                "outputs": {"ALARM": {"type": "bool", "value": 1, "latch": True, "latch_dir": "fall"}},
+            },
+            "rule_defaults": {"ALARM": 1},
+            "rules": [{"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 0}}],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.pvs["ALARM"] = MagicMock()
+
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_latch_any_latches_regardless_of_value(self, mock_init, mock_put):
+        config = {
+            "arguments": {
+                "inputs": {"sensor": {"type": "int", "value": 0, "link": "EXT:S"}},
+                "outputs": {"ALARM": {"type": "bool", "value": 1, "latch": True, "latch_dir": "any"}},
+            },
+            "rule_defaults": {"ALARM": 1},
+            "rules": [{"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 0}}],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.pvs["ALARM"] = MagicMock()
+
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs

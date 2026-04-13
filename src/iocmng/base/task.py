@@ -180,7 +180,7 @@ class TaskBase(ABC):
         self.pvs["ENABLE"] = builder.boolOut(
             "ENABLE",
             initial_value=1,
-            on_update=lambda v: self._on_enable_changed(v),
+            on_update=lambda v: self._on_enable_update(v),
         )
         self.pvs["STATUS"] = builder.mbbIn(
             "STATUS",
@@ -202,7 +202,7 @@ class TaskBase(ABC):
             self.pvs["RUN"] = builder.boolOut(
                 "RUN",
                 initial_value=0,
-                on_update=lambda v: self._on_run_trigger(v),
+                on_update=lambda v: self._on_run_update(v),
             )
         if self.mode in ("continuous", "reactive"):
             self.pvs["CYCLE_COUNT"] = builder.longIn("CYCLE_COUNT", initial_value=0)
@@ -213,12 +213,12 @@ class TaskBase(ABC):
         self.pvs["CLEAR"] = builder.boolOut(
             "CLEAR",
             initial_value=0,
-            on_update=lambda v: self._request_control_action("CLEAR", v),
+            on_update=lambda v: self._on_control_update("CLEAR", v),
         )
         self.pvs["RESET"] = builder.boolOut(
             "RESET",
             initial_value=0,
-            on_update=lambda v: self._request_control_action("RESET", v),
+            on_update=lambda v: self._on_control_update("RESET", v),
         )
 
         reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION", "CLEAR", "RESET"}
@@ -396,6 +396,10 @@ class TaskBase(ABC):
             except Exception:
                 pass
 
+    def _on_enable_update(self, value: Any):
+        self.logger.info("softioc on_update ENABLE value=%r", value)
+        self._on_enable_changed(value)
+
     def _on_enable_changed(self, value):
         self.enabled = bool(value)
         if not self.enabled:
@@ -446,15 +450,20 @@ class TaskBase(ABC):
                 continue
             try:
                 if bool(pv.get()):
-                    self._request_control_action(pv_name, 1)
+                    self._request_control_action(pv_name, 1, source="poll")
             except Exception:
                 pass
         # Keep backward-compatible semantics: a direct call to this method
         # should immediately execute pending CLEAR/RESET requests.
         self._apply_pending_control_actions()
 
-    def _request_control_action(self, pv_name: str, value: Any):
+    def _on_control_update(self, pv_name: str, value: Any):
+        self.logger.info("softioc on_update %s value=%r", pv_name, value)
+        self._request_control_action(pv_name, value, source="callback")
+
+    def _request_control_action(self, pv_name: str, value: Any, source: str = "unknown"):
         """Capture CLEAR/RESET requests from callbacks or poll fallback."""
+        self.logger.info("control request %s source=%s value=%r", pv_name, source, value)
         if not bool(value):
             return
         # Triggered mode has no run loop: apply immediately.
@@ -541,6 +550,10 @@ class TaskBase(ABC):
     # ------------------------------------------------------------------
     # Triggered mode
     # ------------------------------------------------------------------
+
+    def _on_run_update(self, value: Any):
+        self.logger.info("softioc on_update RUN value=%r", value)
+        self._on_run_trigger(value)
 
     def _on_run_trigger(self, value: Any):
         if not bool(value):

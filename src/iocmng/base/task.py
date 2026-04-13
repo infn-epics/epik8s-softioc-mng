@@ -734,9 +734,14 @@ class TaskBase(ABC):
         now = datetime.datetime.now().strftime("%d/%m/%y %H:%M:%S")
         msg = f"{now} - {rule.message}" if rule.message else ""
         self.logger.warning("Rule %s fired: %s", rule.id, msg or "(no message)")
-        # Write timestamped message to a PV if configured
+        # Write timestamped message to a PV if configured.
+        # Truncate to 39 chars to fit EPICS string PV limit (40 incl. null).
+        # Wrap in try/except so a write failure never blocks the actuators.
         if rule.message_pv and msg:
-            self.set_pv(rule.message_pv, msg)
+            try:
+                self.set_pv(rule.message_pv, msg[:39])
+            except Exception as exc:
+                self.logger.warning("message_pv write failed (%s): %s", rule.message_pv, exc)
         # Set declared outputs
         for pv_name, value in rule.outputs.items():
             self.set_pv(pv_name, value)

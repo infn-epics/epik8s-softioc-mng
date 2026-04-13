@@ -1238,3 +1238,73 @@ class TestConnectionTracking:
         mock_monitor.assert_called_once()
         call_kwargs = mock_monitor.call_args
         assert call_kwargs.kwargs.get("conn_callback") is not None
+
+
+class TestEnableMonitorToggle:
+
+    @patch("iocmng.core.pv_client.unmonitor")
+    @patch("iocmng.core.pv_client.monitor")
+    @patch("iocmng.core.pv_client.init")
+    def test_enable_toggle_stops_and_restarts_monitors(self, mock_init, mock_monitor, mock_unmonitor):
+        """ENABLE=0 should unmonitor; ENABLE=1 should monitor again."""
+        config = {
+            "parameters": {"mode": "continuous"},
+            "arguments": {
+                "inputs": {
+                    "sig": {
+                        "type": "int", "value": 0,
+                        "link": "EXT:SIG", "link_mode": "monitor",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.running = True
+
+        task._start_link_monitors()
+        assert mock_monitor.call_count == 1
+        assert task._link_monitors_active is True
+
+        task._on_enable_changed(0)
+        mock_unmonitor.assert_called_once_with("_link_sig")
+        assert task._link_monitors_active is False
+
+        task._on_enable_changed(1)
+        assert mock_monitor.call_count == 2
+        assert task._link_monitors_active is True
+
+    def test_run_wrapper_pauses_when_disabled_and_resumes(self):
+        """Continuous loop should pause on disable and continue after re-enable."""
+        config = {
+            "parameters": {"interval": 0.01, "mode": "continuous"},
+            "arguments": {
+                "inputs": {
+                    "x": {"type": "int", "value": 0},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.running = True
+        task.enabled = False
+
+        poll_calls = {"n": 0}
+
+        def _sleep(_interval):
+            if not task.enabled:
+                task.enabled = True
+            else:
+                task.running = False
+
+        with patch.object(task, "_poll_links", side_effect=lambda: poll_calls.__setitem__("n", poll_calls["n"] + 1)), \
+             patch.object(task, "_evaluate_transforms"), \
+             patch.object(task, "_evaluate_rules"), \
+             patch.object(task, "execute"), \
+             patch.object(task, "step_cycle"), \
+             patch("iocmng.base.task.time.sleep", side_effect=_sleep):
+            task._run_wrapper()
+
+        assert poll_calls["n"] == 1

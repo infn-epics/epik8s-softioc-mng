@@ -135,6 +135,8 @@ class TaskBase(ABC):
         self._wired_output_names: list = [n for n, s in self.plugin_spec.outputs.items() if s.wired]
         # Per-port connection state: True = connected, False = disconnected.
         self._link_connected: Dict[str, bool] = {}
+        # Whether link monitors are currently registered in pv_client.
+        self._link_monitors_active = False
         self._init_buffers()
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
@@ -270,7 +272,10 @@ class TaskBase(ABC):
 
     def _run_wrapper(self):
         try:
-            while self.running and self.enabled:
+            while self.running:
+                if not self.enabled:
+                    time.sleep(0.1)
+                    continue
                 self._poll_links()
                 self._evaluate_transforms()
                 self._evaluate_rules()
@@ -288,7 +293,10 @@ class TaskBase(ABC):
         """Background thread for reactive mode — updates cycle count."""
         interval = self.parameters.get("interval", 1.0)
         try:
-            while self.running and self.enabled:
+            while self.running:
+                if not self.enabled:
+                    time.sleep(0.1)
+                    continue
                 self.step_cycle()
                 time.sleep(interval)
         except Exception as e:
@@ -358,8 +366,18 @@ class TaskBase(ABC):
         self.enabled = bool(value)
         if not self.enabled:
             self.set_status("PAUSED")
+            self.set_message("Task paused")
+            if self.running:
+                self._stop_link_monitors()
         else:
-            self.set_status("RUN")
+            if self.mode == "triggered":
+                self.set_status("INIT")
+                self.set_message("Ready for trigger")
+            else:
+                self.set_status("RUN")
+                self.set_message("Task running")
+            if self.running:
+                self._start_link_monitors()
 
     # ------------------------------------------------------------------
     # Cycle helpers
@@ -534,6 +552,9 @@ class TaskBase(ABC):
         """Set up pv_client monitors for all wired PVs with mode=monitor."""
         from iocmng.core import pv_client
 
+        if self._link_monitors_active:
+            return
+
         for name, spec in self._all_wired():
             # Initialise value cache (unless already seeded by _initial_connectivity_check)
             if name not in self.link_values:
@@ -547,14 +568,19 @@ class TaskBase(ABC):
                     conn_callback=self._make_conn_callback(name, spec),
                 )
                 self.logger.info("link monitor: %s -> %s", name, spec.link)
+        self._link_monitors_active = True
 
     def _stop_link_monitors(self):
         """Close all link monitors."""
         from iocmng.core import pv_client
 
+        if not self._link_monitors_active:
+            return
+
         for name, spec in self._all_wired():
             if spec.link_mode == "monitor":
                 pv_client.unmonitor(f"_link_{name}")
+        self._link_monitors_active = False
 
     def _make_link_callback(self, name, spec):
         """Return a monitor callback for the given wired input."""

@@ -1008,3 +1008,233 @@ class TestTransformEvaluation:
         task._evaluate_rules()
 
         mock_pv.set.assert_called_once_with(1)
+
+
+# ---------------------------------------------------------------------------
+# Connection tracking
+# ---------------------------------------------------------------------------
+
+class TestConnectionTracking:
+
+    def test_wired_input_names_populated(self):
+        """_wired_input_names should list all wired input names in order."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "a": {"type": "int", "value": 0, "link": "EXT:A"},
+                    "b": {"type": "int", "value": 0},           # not wired
+                    "c": {"type": "int", "value": 0, "link": "EXT:C"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        assert task._wired_input_names == ["a", "c"]
+        assert task._wired_output_names == []
+
+    def test_wired_output_names_populated(self):
+        config = {
+            "arguments": {
+                "outputs": {
+                    "x": {"type": "int", "value": 0, "link": "EXT:X"},
+                    "y": {"type": "int", "value": 0},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        assert task._wired_output_names == ["x"]
+        assert task._wired_input_names == []
+
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.init")
+    def test_initial_check_sets_connected(self, mock_init, mock_get):
+        """_initial_connectivity_check should mark reachable PVs as connected."""
+        mock_get.return_value = 42
+        config = {
+            "arguments": {
+                "inputs": {
+                    "a": {"type": "int", "value": 0, "link": "EXT:A"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._initial_connectivity_check()
+        assert task._link_connected["a"] is True
+        assert task.link_values["a"] == 42
+
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.init")
+    def test_initial_check_sets_disconnected(self, mock_init, mock_get):
+        """_initial_connectivity_check should mark unreachable PVs as disconnected."""
+        mock_get.side_effect = TimeoutError("timeout")
+        config = {
+            "arguments": {
+                "inputs": {
+                    "a": {"type": "int", "value": 0, "link": "EXT:A"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._initial_connectivity_check()
+        assert task._link_connected["a"] is False
+        assert task.link_values.get("a", 0) == 0  # stays at default
+
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.init")
+    def test_initial_check_updates_conn_pv(self, mock_init, mock_get):
+        """CONN_INP array PV should reflect initial connectivity."""
+        def _get_side_effect(pv, **kw):
+            if pv == "EXT:A":
+                return 1
+            raise TimeoutError("timeout")
+
+        mock_get.side_effect = _get_side_effect
+        config = {
+            "arguments": {
+                "inputs": {
+                    "a": {"type": "int", "value": 0, "link": "EXT:A"},
+                    "b": {"type": "int", "value": 0, "link": "EXT:B"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_conn_pv = MagicMock()
+        task.pvs["CONN_INP"] = mock_conn_pv
+
+        task._initial_connectivity_check()
+
+        # a connected (1), b disconnected (0)
+        mock_conn_pv.set.assert_called_with([1, 0])
+
+    def test_make_conn_callback_updates_state(self):
+        """Connection callback should update _link_connected and call _update_conn_pv."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S", "link_mode": "monitor"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._link_connected["sensor"] = True
+
+        mock_conn_pv = MagicMock()
+        task.pvs["CONN_INP"] = mock_conn_pv
+
+        sensor_spec = spec.inputs["sensor"]
+        cb = task._make_conn_callback("sensor", sensor_spec)
+
+        # Simulate disconnect
+        cb(False)
+        assert task._link_connected["sensor"] is False
+        mock_conn_pv.set.assert_called_with([0])
+
+        # Simulate reconnect
+        cb(True)
+        assert task._link_connected["sensor"] is True
+        mock_conn_pv.set.assert_called_with([1])
+
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.init")
+    def test_poll_links_tracks_connection_loss(self, mock_init, mock_get):
+        """_poll_links should mark PV as disconnected when get() fails."""
+        call_count = [0]
+
+        def _side_effect(pv, **kw):
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                return 42  # first call succeeds
+            raise TimeoutError("timeout")  # subsequent calls fail
+
+        mock_get.side_effect = _side_effect
+        config = {
+            "parameters": {"interval": 0.01},
+            "arguments": {
+                "inputs": {
+                    "val": {"type": "int", "value": 0, "link": "EXT:VAL"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_conn_pv = MagicMock()
+        task.pvs["CONN_INP"] = mock_conn_pv
+
+        # First poll — connected
+        task._poll_links()
+        assert task._link_connected["val"] is True
+
+        # Second poll — disconnected
+        task._poll_links()
+        assert task._link_connected["val"] is False
+        mock_conn_pv.set.assert_called_with([0])
+
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.init")
+    def test_poll_links_tracks_reconnection(self, mock_init, mock_get):
+        """_poll_links should mark PV as connected again after recovery."""
+        call_count = [0]
+
+        def _side_effect(pv, **kw):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                raise TimeoutError("timeout")  # second call fails
+            return 42
+
+        mock_get.side_effect = _side_effect
+        config = {
+            "parameters": {"interval": 0.01},
+            "arguments": {
+                "inputs": {
+                    "val": {"type": "int", "value": 0, "link": "EXT:VAL"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_conn_pv = MagicMock()
+        task.pvs["CONN_INP"] = mock_conn_pv
+
+        task._poll_links()   # ok
+        task._poll_links()   # fail
+        assert task._link_connected["val"] is False
+        task._poll_links()   # ok again
+        assert task._link_connected["val"] is True
+
+    @patch("iocmng.core.pv_client.monitor")
+    @patch("iocmng.core.pv_client.init")
+    def test_start_link_monitors_passes_conn_callback(self, mock_init, mock_monitor):
+        """_start_link_monitors should pass conn_callback to pv_client.monitor."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sig": {
+                        "type": "int", "value": 0,
+                        "link": "EXT:SIG", "link_mode": "monitor",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task._start_link_monitors()
+
+        mock_monitor.assert_called_once()
+        call_kwargs = mock_monitor.call_args
+        assert call_kwargs.kwargs.get("conn_callback") is not None

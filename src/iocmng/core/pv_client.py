@@ -88,8 +88,16 @@ def monitor(
     pv_name: str,
     callback: Callable[[Any], None],
     name: Optional[str] = None,
+    conn_callback: Optional[Callable[[bool], None]] = None,
 ) -> str:
     """Start a subscription (monitor) on an external PV.
+
+    Args:
+        pv_name: The PV to subscribe to.
+        callback: Called with the new value on each update.
+        name: Optional subscription key (defaults to *pv_name*).
+        conn_callback: Optional callback invoked with ``True`` on connect
+            and ``False`` on disconnect.  Supported for both CA and PVA.
 
     Returns:
         The subscription key (use with :func:`unmonitor`).
@@ -104,6 +112,10 @@ def monitor(
                 callback(value)
 
         pv = epics.PV(pv_name)
+        if conn_callback is not None:
+            pv.connection_callbacks.append(
+                lambda pvname=None, conn=None, **kw: conn_callback(bool(conn))
+            )
         pv.add_callback(_ca_callback)
         with _lock:
             old = _subscriptions.pop(key, None)
@@ -114,7 +126,25 @@ def monitor(
         return key
 
     ctx = _get_context()
-    sub = ctx.monitor(pv_name, callback)
+
+    if conn_callback is not None:
+        # p4p: wrap callback to detect Disconnected events
+        def _pva_value_cb(value):
+            try:
+                from p4p.nt import NTScalar  # noqa: F401
+                # p4p delivers Disconnected as a special type
+                if isinstance(value, Exception):
+                    conn_callback(False)
+                    return
+                conn_callback(True)
+                callback(value)
+            except Exception:
+                callback(value)
+
+        sub = ctx.monitor(pv_name, _pva_value_cb, notify_disconnect=True)
+    else:
+        sub = ctx.monitor(pv_name, callback)
+
     with _lock:
         old = _subscriptions.pop(key, None)
         if old is not None:

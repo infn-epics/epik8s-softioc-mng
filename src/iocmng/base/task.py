@@ -129,6 +129,12 @@ class TaskBase(ABC):
         self._link_poll_timers: Dict[str, float] = {}
         # Ring buffers for inputs/outputs with buffer_size.
         self._link_buffers: Dict[str, deque] = {}
+        # ── Connection tracking ──────────────────────────────────────
+        # Ordered lists of wired input/output names (stable index for array PVs).
+        self._wired_input_names: list = [n for n, s in self.plugin_spec.inputs.items() if s.wired]
+        self._wired_output_names: list = [n for n, s in self.plugin_spec.outputs.items() if s.wired]
+        # Per-port connection state: True = connected, False = disconnected.
+        self._link_connected: Dict[str, bool] = {}
         self._init_buffers()
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
@@ -196,6 +202,28 @@ class TaskBase(ABC):
                 continue
             self.pvs[pv_name] = create_softioc_record(pv_spec)
 
+        # ── Connection-status waveform PVs ───────────────────────────
+        # One element per wired port: 1 = connected, 0 = disconnected.
+        n_inp = len(self._wired_input_names)
+        n_out = len(self._wired_output_names)
+        if n_inp > 0:
+            self.pvs["CONN_INP"] = builder.WaveformIn(
+                "CONN_INP", initial_value=[0] * n_inp, length=n_inp,
+            )
+            # Companion PV listing port names in the same index order.
+            labels = "\n".join(self._wired_input_names)
+            self.pvs["CONN_INP_NAMES"] = builder.stringIn(
+                "CONN_INP_NAMES", initial_value=labels[:39],
+            )
+        if n_out > 0:
+            self.pvs["CONN_OUT"] = builder.WaveformIn(
+                "CONN_OUT", initial_value=[0] * n_out, length=n_out,
+            )
+            labels = "\n".join(self._wired_output_names)
+            self.pvs["CONN_OUT_NAMES"] = builder.stringIn(
+                "CONN_OUT_NAMES", initial_value=labels[:39],
+            )
+
         self.logger.info(f"Created {len(self.pvs)} PVs with prefix: {self.pv_prefix}")
 
     # ------------------------------------------------------------------
@@ -217,6 +245,10 @@ class TaskBase(ABC):
         self.running = True
         self.set_status("RUN")
         self.set_message("Task running")
+
+        # Initial connectivity check: poll all wired inputs once to seed
+        # link_values and surface disconnected PVs before monitors take over.
+        self._initial_connectivity_check()
 
         # Start link monitors for wired inputs with mode=monitor
         self._start_link_monitors()
@@ -440,19 +472,79 @@ class TaskBase(ABC):
         yield from self._wired_inputs()
         yield from self._wired_outputs()
 
+    def _initial_connectivity_check(self) -> None:
+        """Poll all wired inputs once at startup to seed link_values and detect unreachable PVs.
+
+        - Connected PVs: ``link_values`` is seeded with the real value.
+        - Unreachable PVs: logged as WARNING; value stays at config default.
+        - Connection state is recorded in ``_link_connected`` and published
+          to the ``CONN_INP`` array PV.
+        - Summary is written to MESSAGE and, if declared, ``SYS_CONN``.
+        """
+        from iocmng.core import pv_client
+
+        timeout = float(self.parameters.get("timeout", 5.0))
+        disconnected: list = []
+        connected = 0
+
+        self.set_message("Checking connectivity...")
+        self.logger.info("[init-conn] Polling %d wired inputs...",
+                         sum(1 for _ in self._wired_inputs()))
+
+        for name, spec in self._wired_inputs():
+            try:
+                value = pv_client.get(spec.link, timeout=timeout)
+                self.link_values[name] = value
+                self._link_prev[name] = value
+                self._buffer_append(name, value)
+                self._link_connected[name] = True
+                if name in self.pvs:
+                    try:
+                        self.pvs[name].set(value)
+                    except Exception:
+                        pass
+                self.logger.info("[init-conn] OK    %s (%s) = %s", name, spec.link, value)
+                connected += 1
+            except Exception as exc:
+                disconnected.append(name)
+                self._link_connected[name] = False
+                self.logger.warning("[init-conn] FAIL  %s (%s): %s", name, spec.link, exc)
+
+        # Update the CONN_INP array PV
+        self._update_conn_pv("input")
+
+        total = connected + len(disconnected)
+        if disconnected:
+            names = ', '.join(disconnected)
+            conn_msg = f"DISCONNECTED ({len(disconnected)}/{total}): {names}"
+            self.logger.warning("[init-conn] %s", conn_msg)
+            self.set_message(conn_msg[:39])
+        else:
+            conn_msg = "OK"
+            self.logger.info("[init-conn] All %d inputs reachable.", total)
+            self.set_message(f"All {total} inputs connected")
+
+        if "SYS_CONN" in self.pvs:
+            try:
+                self.pvs["SYS_CONN"].set(conn_msg)
+            except Exception:
+                pass
+
     def _start_link_monitors(self):
         """Set up pv_client monitors for all wired PVs with mode=monitor."""
         from iocmng.core import pv_client
 
         for name, spec in self._all_wired():
-            # Initialise value cache
-            self.link_values[name] = spec.value
-            self._link_prev[name] = spec.value
+            # Initialise value cache (unless already seeded by _initial_connectivity_check)
+            if name not in self.link_values:
+                self.link_values[name] = spec.value
+                self._link_prev[name] = spec.value
             if spec.link_mode == "monitor":
                 pv_client.monitor(
                     spec.link,
                     callback=self._make_link_callback(name, spec),
                     name=f"_link_{name}",
+                    conn_callback=self._make_conn_callback(name, spec),
                 )
                 self.logger.info("link monitor: %s -> %s", name, spec.link)
 
@@ -487,6 +579,40 @@ class TaskBase(ABC):
                     self._evaluate_rules()
         return _cb
 
+    def _make_conn_callback(self, name, spec):
+        """Return a connection-state callback for the given wired PV."""
+        def _conn_cb(connected: bool):
+            old = self._link_connected.get(name)
+            self._link_connected[name] = connected
+            direction = "input" if spec.direction == "input" else "output"
+            if connected != old:
+                if connected:
+                    self.logger.info("[conn] %s (%s) CONNECTED", name, spec.link)
+                else:
+                    self.logger.warning("[conn] %s (%s) DISCONNECTED", name, spec.link)
+                self._update_conn_pv(direction)
+        return _conn_cb
+
+    def _update_conn_pv(self, direction: str) -> None:
+        """Refresh the CONN_INP or CONN_OUT waveform PV from ``_link_connected``.
+
+        Args:
+            direction: ``"input"`` or ``"output"``.
+        """
+        if direction == "input":
+            names = self._wired_input_names
+            pv_key = "CONN_INP"
+        else:
+            names = self._wired_output_names
+            pv_key = "CONN_OUT"
+        if pv_key not in self.pvs or not names:
+            return
+        arr = [1 if self._link_connected.get(n, False) else 0 for n in names]
+        try:
+            self.pvs[pv_key].set(arr)
+        except Exception:
+            pass
+
     def _poll_links(self):
         """Read all wired PVs with mode=poll (called from _run_wrapper)."""
         from iocmng.core import pv_client
@@ -507,7 +633,16 @@ class TaskBase(ABC):
                 value = pv_client.get(spec.link, timeout=timeout)
             except Exception as exc:
                 self.logger.warning("link poll failed: %s (%s): %s", name, spec.link, exc)
+                if self._link_connected.get(name) is not False:
+                    self._link_connected[name] = False
+                    direction = "input" if spec.direction == "input" else "output"
+                    self._update_conn_pv(direction)
                 continue
+            # Mark connected (update array PV only on state change)
+            if not self._link_connected.get(name):
+                self._link_connected[name] = True
+                direction = "input" if spec.direction == "input" else "output"
+                self._update_conn_pv(direction)
             old = self.link_values.get(name)
             self.link_values[name] = value
             self._buffer_append(name, value)

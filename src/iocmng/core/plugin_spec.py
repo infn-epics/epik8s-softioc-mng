@@ -396,7 +396,7 @@ def create_softioc_record(spec: PvArgumentSpec, on_update=None):
             ONAM=spec.onam,
         )
         if spec.alarm_on:
-            kwargs["ONSV"] = spec.alarm_on
+            kwargs["OSV"] = spec.alarm_on
         if spec.writable:
             return builder.boolOut(spec.name, on_update=on_update, **kwargs)
         return builder.boolIn(spec.name, **kwargs)

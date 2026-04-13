@@ -1735,6 +1735,48 @@ class TestLatchFeature:
         task._evaluate_rules()
         assert "ALARM" in task._latched_outputs
 
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_clear_inhibit_not_released_by_unrelated_false_rule(self, mock_init, mock_put):
+        """If multiple rules write the same output, a false rule must not
+        release clear-inhibit while another rule is still actively writing
+        that output."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0, "latch": True},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor > 80", "outputs": {"ALARM": 1}},
+                {"id": "R2", "condition": "sensor < 10", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        task.pvs["ALARM"] = MagicMock()
+        task.pvs["CLEAR"] = MagicMock()
+
+        # Latch through R1.
+        task.link_values = {"sensor": 90}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+
+        # CLEAR establishes inhibit.
+        task._on_clear(1)
+        assert "ALARM" in task._clear_inhibit
+
+        # Same sensor value: R1 true, R2 false. Inhibit must remain active.
+        task._evaluate_rules()
+        assert "ALARM" not in task._latched_outputs
+        assert "ALARM" in task._clear_inhibit
+
         # CLEAR
         task._on_clear(1)
         assert len(task._latched_outputs) == 0

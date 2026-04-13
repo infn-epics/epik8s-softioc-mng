@@ -897,19 +897,23 @@ class TaskBase(ABC):
                 continue
             self.set_pv(pv_name, value)
 
+        # Outputs written by at least one fired rule in this cycle.
+        fired_outputs = set()
         for rule in rules:
             try:
                 if safe_eval(rule.condition, self._build_eval_context()):
+                    fired_outputs.update(rule.outputs.keys())
                     self._fire_rule(rule)
-                else:
-                    # Condition is false — release the clear-inhibit for any
-                    # outputs this rule drives, so the latch can re-arm when
-                    # the condition becomes true again.
-                    if self._clear_inhibit:
-                        for pv_name in rule.outputs:
-                            self._clear_inhibit.discard(pv_name)
             except Exception as exc:
                 self.logger.error("Rule %s eval error: %s", rule.id, exc)
+
+        # Re-arm latch only when no fired rule wrote that output this cycle.
+        # This avoids premature inhibit release when multiple rules target
+        # the same output and at least one is still active.
+        if self._clear_inhibit:
+            for pv_name in list(self._clear_inhibit):
+                if pv_name not in fired_outputs:
+                    self._clear_inhibit.discard(pv_name)
 
     def _fire_rule(self, rule: RuleSpec):
         """Execute the actions for a fired rule."""

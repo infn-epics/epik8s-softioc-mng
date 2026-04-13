@@ -11,6 +11,7 @@ build/
 
 # Virtual environments
 venv/
+.venv/
 env/
 ENV/
 
@@ -32,6 +33,9 @@ Thumbs.db
 # Project specific
 values.yaml.local
 config.yaml.local
+
+# Generated OPI displays
+*.bob
 
 # Plugins (cloned at runtime)
 /plugins/

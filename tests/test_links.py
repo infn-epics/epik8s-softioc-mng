@@ -1701,6 +1701,59 @@ class TestLatchFeature:
         task._evaluate_rules()
         mock_pv.set.assert_called_once_with(0)
 
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_clear_inhibits_relatch_while_condition_still_true(self, mock_init, mock_put):
+        """After CLEAR, if the rule condition is still true, the output must
+        NOT be re-latched immediately — the operator expects one press of
+        CLEAR to hold the output at its default until the condition goes
+        false, then true again."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0, "latch": True},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor > 80", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["ALARM"] = mock_pv
+        task.pvs["CLEAR"] = MagicMock()
+
+        # Trigger and latch
+        task.link_values = {"sensor": 90}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+
+        # CLEAR
+        task._on_clear(1)
+        assert len(task._latched_outputs) == 0
+        assert "ALARM" in task._clear_inhibit
+
+        # Next cycle — condition STILL true → must NOT re-latch
+        task._evaluate_rules()
+        assert "ALARM" not in task._latched_outputs
+
+        # Condition goes false → inhibit released
+        task.link_values = {"sensor": 50}
+        task._evaluate_rules()
+        assert "ALARM" not in task._clear_inhibit
+
+        # Condition true again → now it should re-latch normally
+        task.link_values = {"sensor": 90}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+
 
 # ---------------------------------------------------------------------------
 # CLEAR/RESET sync from external PV client

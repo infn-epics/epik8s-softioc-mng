@@ -140,6 +140,11 @@ class TaskBase(ABC):
         # ── Latch tracking ───────────────────────────────────────────
         # Set of output PV names whose value has been latched by a fired rule.
         self._latched_outputs: set = set()
+        # Outputs recently released by CLEAR/RESET.  While an output is in
+        # this set, _fire_rule won't re-latch it.  The inhibit is removed
+        # when the rule condition that drives the output goes *false* for
+        # one cycle, so a new rising-edge can re-arm the latch naturally.
+        self._clear_inhibit: set = set()
         self._init_buffers()
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
@@ -196,16 +201,17 @@ class TaskBase(ABC):
         if self.mode in ("continuous", "reactive"):
             self.pvs["CYCLE_COUNT"] = builder.longIn("CYCLE_COUNT", initial_value=0)
 
-        # CLEAR / RESET control PVs for latch support
+        # CLEAR / RESET control PVs for latch support.
+        # No on_update callback — these are polled each cycle by
+        # _sync_control_pvs_from_pv() in the task thread to avoid
+        # cross-thread races with the rule evaluation loop.
         self.pvs["CLEAR"] = builder.boolOut(
             "CLEAR",
             initial_value=0,
-            on_update=lambda v: self._on_clear(v),
         )
         self.pvs["RESET"] = builder.boolOut(
             "RESET",
             initial_value=0,
-            on_update=lambda v: self._on_reset(v),
         )
 
         reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION", "CLEAR", "RESET"}
@@ -441,6 +447,9 @@ class TaskBase(ABC):
             return
         if self._latched_outputs:
             self.logger.info("CLEAR: releasing latched outputs: %s", self._latched_outputs)
+            # Inhibit re-latching until each output's rule condition goes
+            # false for at least one cycle (prevents immediate re-latch).
+            self._clear_inhibit.update(self._latched_outputs)
             # Reset latched outputs to their rule_defaults value
             for pv_name in list(self._latched_outputs):
                 default = self.plugin_spec.rule_defaults.get(pv_name)
@@ -851,6 +860,13 @@ class TaskBase(ABC):
             try:
                 if safe_eval(rule.condition, self._build_eval_context()):
                     self._fire_rule(rule)
+                else:
+                    # Condition is false — release the clear-inhibit for any
+                    # outputs this rule drives, so the latch can re-arm when
+                    # the condition becomes true again.
+                    if self._clear_inhibit:
+                        for pv_name in rule.outputs:
+                            self._clear_inhibit.discard(pv_name)
             except Exception as exc:
                 self.logger.error("Rule %s eval error: %s", rule.id, exc)
 
@@ -872,6 +888,9 @@ class TaskBase(ABC):
             self.set_pv(pv_name, value)
             # If this output has latch=True, record it so rule_defaults
             # won't reset it on subsequent evaluation cycles.
+            # Skip re-latching if the output is inhibited after a recent CLEAR.
+            if pv_name in self._clear_inhibit:
+                continue
             spec = self.plugin_spec.outputs.get(pv_name)
             if spec is not None and spec.latch:
                 latch_dir = spec.latch_dir  # "rise", "fall", "any"

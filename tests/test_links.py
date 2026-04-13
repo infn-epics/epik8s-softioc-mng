@@ -1308,3 +1308,395 @@ class TestEnableMonitorToggle:
             task._run_wrapper()
 
         assert poll_calls["n"] == 1
+
+    @patch("iocmng.core.pv_client.unmonitor")
+    @patch("iocmng.core.pv_client.monitor")
+    @patch("iocmng.core.pv_client.init")
+    def test_enable_disable_enable_disable_enable_sequence(self, mock_init, mock_monitor, mock_unmonitor):
+        """Repeated ENABLE 0/1/0/1 toggles should stop and restart monitors cleanly."""
+        config = {
+            "parameters": {"interval": 0.01, "mode": "continuous"},
+            "arguments": {
+                "inputs": {
+                    "sig": {
+                        "type": "int", "value": 0,
+                        "link": "EXT:SIG", "link_mode": "monitor",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.running = True
+
+        task._start_link_monitors()
+        task._on_enable_changed(0)
+        task._on_enable_changed(1)
+        task._on_enable_changed(0)
+        task._on_enable_changed(1)
+
+        assert mock_monitor.call_count == 3
+        assert mock_unmonitor.call_count == 2
+        mock_unmonitor.assert_has_calls([call("_link_sig"), call("_link_sig")])
+        assert task.enabled is True
+        assert task._link_monitors_active is True
+
+    def test_cycle_count_resumes_after_enable_disable_enable_disable_enable(self):
+        """Cycle execution should continue across repeated disable/enable transitions."""
+        config = {
+            "parameters": {"interval": 0.01, "mode": "continuous"},
+            "arguments": {"inputs": {"x": {"type": "int", "value": 0}}},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="countdemo", plugin_spec=spec)
+        task.initialize()
+        task.running = True
+        task.enabled = True
+        state = {"cycles": 0}
+
+        def _step_side_effect():
+            task.cycle_count += 1
+            state["cycles"] += 1
+            if state["cycles"] == 1:
+                task._on_enable_changed(0)
+            elif state["cycles"] == 2:
+                task._on_enable_changed(0)
+            elif state["cycles"] == 3:
+                task.running = False
+
+        def _sleep_side_effect(_interval):
+            if not task.enabled and task.running:
+                task._on_enable_changed(1)
+
+        with patch.object(task, "_poll_links"), \
+             patch.object(task, "_evaluate_transforms"), \
+             patch.object(task, "_evaluate_rules"), \
+             patch.object(task, "execute"), \
+             patch.object(task, "step_cycle", side_effect=_step_side_effect), \
+             patch("iocmng.base.task.time.sleep", side_effect=_sleep_side_effect):
+            task._run_wrapper()
+
+        assert task.cycle_count == 3
+        assert state["cycles"] == 3
+        assert task.enabled is True
+
+    def test_sync_enable_state_from_pv_detects_external_disable_enable(self):
+        """Task should follow ENABLE PV value even if callback was not invoked."""
+        config = {
+            "parameters": {"mode": "continuous"},
+            "arguments": {"inputs": {"x": {"type": "int", "value": 0}}},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.running = True
+        task.pvs["ENABLE"] = MagicMock()
+
+        with patch.object(task, "_stop_link_monitors") as mock_stop, \
+             patch.object(task, "_start_link_monitors") as mock_start:
+            task.pvs["ENABLE"].get.return_value = 0
+            task._sync_enable_state_from_pv()
+            assert task.enabled is False
+            mock_stop.assert_called_once()
+
+            task.pvs["ENABLE"].get.return_value = 1
+            task._sync_enable_state_from_pv()
+            assert task.enabled is True
+            mock_start.assert_called_once()
+
+    def test_run_wrapper_syncs_enable_state_from_pv(self):
+        """Continuous loop should observe external ENABLE PV changes while paused."""
+        config = {
+            "parameters": {"interval": 0.01, "mode": "continuous"},
+            "arguments": {"inputs": {"x": {"type": "int", "value": 0}}},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.running = True
+
+        enable_values = iter([0, 1, 1])
+        task.pvs["ENABLE"] = MagicMock()
+        task.pvs["ENABLE"].get.side_effect = lambda: next(enable_values)
+        poll_calls = {"n": 0}
+
+        def _sleep(_interval):
+            if poll_calls["n"] >= 1:
+                task.running = False
+
+        with patch.object(task, "_poll_links", side_effect=lambda: poll_calls.__setitem__("n", poll_calls["n"] + 1)), \
+             patch.object(task, "_evaluate_transforms"), \
+             patch.object(task, "_evaluate_rules"), \
+             patch.object(task, "execute"), \
+             patch.object(task, "step_cycle"), \
+             patch("iocmng.base.task.time.sleep", side_effect=_sleep):
+            task._run_wrapper()
+
+        assert poll_calls["n"] == 1
+        assert task.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Latch feature
+# ---------------------------------------------------------------------------
+
+class TestLatchFeature:
+
+    def test_pv_argument_spec_latch_default_false(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {"type": "bool", "value": 0})
+        assert spec.latch is False
+
+    def test_pv_argument_spec_latch_true(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True,
+        })
+        assert spec.latch is True
+
+    def test_pv_argument_spec_to_dict_includes_latch(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {
+            "type": "bool", "value": 0, "latch": True,
+        })
+        d = spec.to_dict()
+        assert d["latch"] is True
+
+    def test_pv_argument_spec_to_dict_omits_latch_when_false(self):
+        spec = PvArgumentSpec.from_config("OUT", "output", {"type": "bool", "value": 0})
+        d = spec.to_dict()
+        assert "latch" not in d
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_latched_output_not_reset_by_rule_defaults(self, mock_init, mock_put):
+        """Once a latched output is set by a rule, rule_defaults should skip it."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0, "latch": True},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["ALARM"] = mock_pv
+
+        # First cycle: sensor==0, rule fires, ALARM latched
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+        mock_pv.set.reset_mock()
+
+        # Second cycle: sensor!=0, rule does NOT fire.
+        # rule_defaults should NOT reset ALARM because it is latched.
+        task.link_values = {"sensor": 1}
+        task._evaluate_rules()
+        mock_pv.set.assert_not_called()
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_non_latched_output_still_reset(self, mock_init, mock_put):
+        """Non-latched outputs should still be reset by rule_defaults."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["ALARM"] = mock_pv
+
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" not in task._latched_outputs
+        mock_pv.set.reset_mock()
+
+        # No rule fires → default resets ALARM to 0
+        task.link_values = {"sensor": 1}
+        task._evaluate_rules()
+        mock_pv.set.assert_called_once_with(0)
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_clear_releases_latched_outputs(self, mock_init, mock_put):
+        """CLEAR should reset latched outputs to their rule_defaults value."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0, "latch": True},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_alarm = MagicMock()
+        mock_clear = MagicMock()
+        task.pvs["ALARM"] = mock_alarm
+        task.pvs["CLEAR"] = mock_clear
+
+        # Latch ALARM
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+        mock_alarm.set.reset_mock()
+
+        # CLEAR
+        task._on_clear(1)
+        assert len(task._latched_outputs) == 0
+        mock_alarm.set.assert_called_with(0)  # reset to default
+        mock_clear.set.assert_called_with(0)  # auto-reset
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_clear_with_no_latches_is_noop(self, mock_init, mock_put):
+        """CLEAR when nothing is latched should not error."""
+        config = {
+            "arguments": {
+                "outputs": {"ALARM": {"type": "bool", "value": 0, "latch": True}},
+            },
+            "rule_defaults": {"ALARM": 0},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.pvs["CLEAR"] = MagicMock()
+
+        task._on_clear(1)
+        assert len(task._latched_outputs) == 0
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_clear_value_zero_ignored(self, mock_init, mock_put):
+        """CLEAR=0 should be ignored (only react to 1)."""
+        config = {
+            "arguments": {
+                "outputs": {"ALARM": {"type": "bool", "value": 0, "latch": True}},
+            },
+            "rule_defaults": {"ALARM": 0},
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._latched_outputs.add("ALARM")
+
+        task._on_clear(0)
+        assert "ALARM" in task._latched_outputs  # unchanged
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_reset_clears_latches_and_cycle_count(self, mock_init, mock_put):
+        """RESET should clear latches, reset cycle counter, and re-init."""
+        config = {
+            "parameters": {"mode": "continuous"},
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0, "latch": True},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_alarm = MagicMock()
+        mock_clear = MagicMock()
+        mock_reset = MagicMock()
+        mock_cycle = MagicMock()
+        task.pvs["ALARM"] = mock_alarm
+        task.pvs["CLEAR"] = mock_clear
+        task.pvs["RESET"] = mock_reset
+        task.pvs["CYCLE_COUNT"] = mock_cycle
+
+        # Latch ALARM and advance cycles
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        task.cycle_count = 42
+        assert "ALARM" in task._latched_outputs
+
+        # RESET
+        with patch.object(task, "_initial_connectivity_check") as mock_conn:
+            task._on_reset(1)
+            mock_conn.assert_called_once()
+
+        assert len(task._latched_outputs) == 0
+        assert task.cycle_count == 0
+        mock_cycle.set.assert_called_with(0)
+        mock_alarm.set.assert_any_call(0)
+        mock_reset.set.assert_called_with(0)
+
+    @patch("iocmng.core.pv_client.put")
+    @patch("iocmng.core.pv_client.init")
+    def test_after_clear_rule_defaults_reset_again(self, mock_init, mock_put):
+        """After CLEAR, the output should be subject to rule_defaults again."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S"},
+                },
+                "outputs": {
+                    "ALARM": {"type": "bool", "value": 0, "latch": True},
+                },
+            },
+            "rule_defaults": {"ALARM": 0},
+            "rules": [
+                {"id": "R1", "condition": "sensor == 0", "outputs": {"ALARM": 1}},
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+
+        mock_pv = MagicMock()
+        task.pvs["ALARM"] = mock_pv
+        task.pvs["CLEAR"] = MagicMock()
+
+        # Latch
+        task.link_values = {"sensor": 0}
+        task._evaluate_rules()
+        assert "ALARM" in task._latched_outputs
+
+        # Clear
+        task._on_clear(1)
+        mock_pv.set.reset_mock()
+
+        # Next cycle: sensor != 0, no rule fires → defaults should reset ALARM
+        task.link_values = {"sensor": 1}
+        task._evaluate_rules()
+        mock_pv.set.assert_called_once_with(0)

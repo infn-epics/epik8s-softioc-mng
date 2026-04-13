@@ -137,6 +137,9 @@ class TaskBase(ABC):
         self._link_connected: Dict[str, bool] = {}
         # Whether link monitors are currently registered in pv_client.
         self._link_monitors_active = False
+        # ── Latch tracking ───────────────────────────────────────────
+        # Set of output PV names whose value has been latched by a fired rule.
+        self._latched_outputs: set = set()
         self._init_buffers()
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
@@ -193,7 +196,19 @@ class TaskBase(ABC):
         if self.mode in ("continuous", "reactive"):
             self.pvs["CYCLE_COUNT"] = builder.longIn("CYCLE_COUNT", initial_value=0)
 
-        reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION"}
+        # CLEAR / RESET control PVs for latch support
+        self.pvs["CLEAR"] = builder.boolOut(
+            "CLEAR",
+            initial_value=0,
+            on_update=lambda v: self._on_clear(v),
+        )
+        self.pvs["RESET"] = builder.boolOut(
+            "RESET",
+            initial_value=0,
+            on_update=lambda v: self._on_reset(v),
+        )
+
+        reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION", "CLEAR", "RESET"}
         for pv_name, pv_spec in self.plugin_spec.inputs.items():
             if pv_name in reserved:
                 continue
@@ -273,6 +288,7 @@ class TaskBase(ABC):
     def _run_wrapper(self):
         try:
             while self.running:
+                self._sync_enable_state_from_pv()
                 if not self.enabled:
                     time.sleep(0.1)
                     continue
@@ -294,6 +310,7 @@ class TaskBase(ABC):
         interval = self.parameters.get("interval", 1.0)
         try:
             while self.running:
+                self._sync_enable_state_from_pv()
                 if not self.enabled:
                     time.sleep(0.1)
                     continue
@@ -365,11 +382,13 @@ class TaskBase(ABC):
     def _on_enable_changed(self, value):
         self.enabled = bool(value)
         if not self.enabled:
+            self.logger.info("ENABLE changed: task disabled")
             self.set_status("PAUSED")
             self.set_message("Task paused")
             if self.running:
                 self._stop_link_monitors()
         else:
+            self.logger.info("ENABLE changed: task enabled")
             if self.mode == "triggered":
                 self.set_status("INIT")
                 self.set_message("Ready for trigger")
@@ -378,6 +397,63 @@ class TaskBase(ABC):
                 self.set_message("Task running")
             if self.running:
                 self._start_link_monitors()
+
+    def _sync_enable_state_from_pv(self):
+        """Synchronize task enabled state from the ENABLE record.
+
+        External PVA/CA clients may update the underlying record value without
+        reliably invoking the softioc ``on_update`` callback in this process.
+        Reading the current record value makes ENABLE/disable semantics robust
+        regardless of transport.
+        """
+        enable_pv = self.pvs.get("ENABLE")
+        if enable_pv is None:
+            return
+        try:
+            current = bool(enable_pv.get())
+        except Exception:
+            return
+        if current != self.enabled:
+            self._on_enable_changed(current)
+
+    def _on_clear(self, value):
+        """Handle CLEAR PV write — release all latched outputs."""
+        if not bool(value):
+            return
+        if self._latched_outputs:
+            self.logger.info("CLEAR: releasing latched outputs: %s", self._latched_outputs)
+            # Reset latched outputs to their rule_defaults value
+            for pv_name in list(self._latched_outputs):
+                default = self.plugin_spec.rule_defaults.get(pv_name)
+                if default is not None:
+                    self.set_pv(pv_name, default)
+            self._latched_outputs.clear()
+        else:
+            self.logger.info("CLEAR: no outputs currently latched")
+        # Auto-reset the CLEAR PV back to 0
+        if "CLEAR" in self.pvs:
+            self.pvs["CLEAR"].set(0)
+
+    def _on_reset(self, value):
+        """Handle RESET PV write — clear latches, reset counters, re-init."""
+        if not bool(value):
+            return
+        self.logger.info("RESET: full task reset requested")
+        # 1. Clear latches
+        self._on_clear(1)
+        # 2. Reset cycle counter
+        self.cycle_count = 0
+        if "CYCLE_COUNT" in self.pvs:
+            try:
+                self.pvs["CYCLE_COUNT"].set(0)
+            except Exception:
+                pass
+        # 3. Re-run initial connectivity check
+        self._initial_connectivity_check()
+        # Auto-reset the RESET PV back to 0
+        if "RESET" in self.pvs:
+            self.pvs["RESET"].set(0)
+        self.set_message("Task reset")
 
     # ------------------------------------------------------------------
     # Cycle helpers
@@ -744,8 +820,12 @@ class TaskBase(ABC):
         if not rules:
             return
 
-        # Apply rule defaults before evaluation (reset phase)
+        # Apply rule defaults before evaluation (reset phase).
+        # Skip outputs that are currently latched — they keep their value
+        # until explicitly cleared via the CLEAR or RESET PV.
         for pv_name, value in self.plugin_spec.rule_defaults.items():
+            if pv_name in self._latched_outputs:
+                continue
             self.set_pv(pv_name, value)
 
         for rule in rules:
@@ -771,6 +851,12 @@ class TaskBase(ABC):
         # Set declared outputs
         for pv_name, value in rule.outputs.items():
             self.set_pv(pv_name, value)
+            # If this output has latch=True, record it so rule_defaults
+            # won't reset it on subsequent evaluation cycles.
+            spec = self.plugin_spec.outputs.get(pv_name)
+            if spec is not None and spec.latch:
+                self._latched_outputs.add(pv_name)
+                self.logger.info("Output %s latched by rule %s", pv_name, rule.id)
         # Fire actuators (write to external wired PVs)
         timeout = float(self.parameters.get("timeout", 5.0))
         for key, value in rule.actuators.items():

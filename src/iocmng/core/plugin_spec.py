@@ -100,6 +100,7 @@ class PvArgumentSpec:
     poll_rate: Optional[float] = None
     trigger: bool = False
     buffer_size: Optional[int] = None
+    latch: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -116,6 +117,7 @@ class PvArgumentSpec:
         poll_rate = float(poll_rate_raw) if poll_rate_raw is not None else None
         buf_raw = raw.get("buffer_size")
         buffer_size = int(buf_raw) if buf_raw is not None and int(buf_raw) > 0 else None
+        latch = bool(raw.get("latch", False))
         return cls(
             name=name,
             direction=direction,
@@ -132,6 +134,7 @@ class PvArgumentSpec:
             poll_rate=poll_rate,
             trigger=bool(raw.get("trigger", False)),
             buffer_size=buffer_size,
+            latch=latch,
             raw=dict(raw),
         )
 
@@ -167,6 +170,8 @@ class PvArgumentSpec:
             normalized["trigger"] = self.trigger
         if self.buffer_size is not None:
             normalized["buffer_size"] = self.buffer_size
+        if self.latch:
+            normalized["latch"] = True
         return normalized
 
 

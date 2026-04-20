@@ -1273,6 +1273,134 @@ class TestConnectionTracking:
         task._poll_links()   # ok again
         assert task._link_connected["val"] is True
 
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.monitor")
+    @patch("iocmng.core.pv_client.unmonitor")
+    @patch("iocmng.core.pv_client.init")
+    def test_monitor_links_are_actively_retried_when_disconnected(
+        self, mock_init, mock_unmonitor, mock_monitor, mock_get
+    ):
+        """Disconnected monitor links should be actively probed and restored."""
+        mock_get.return_value = 77
+        config = {
+            "parameters": {"interval": 0.01, "retry_interval": 0},
+            "arguments": {
+                "inputs": {
+                    "sensor": {
+                        "type": "int",
+                        "value": 0,
+                        "link": "EXT:S",
+                        "link_mode": "monitor",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._link_connected["sensor"] = False
+
+        mock_conn_pv = MagicMock()
+        task.pvs["CONN_INP"] = mock_conn_pv
+
+        task._poll_links()
+
+        mock_get.assert_called_with("EXT:S", timeout=5.0)
+        assert task._link_connected["sensor"] is True
+        assert task.link_values["sensor"] == 77
+        mock_conn_pv.set.assert_called_with([1])
+
+    @patch("iocmng.core.pv_client.get")
+    @patch("iocmng.core.pv_client.monitor")
+    @patch("iocmng.core.pv_client.unmonitor")
+    @patch("iocmng.core.pv_client.init")
+    def test_clear_retries_disconnected_input_links(
+        self, mock_init, mock_unmonitor, mock_monitor, mock_get
+    ):
+        """CLEAR should force a retry of disconnected input links."""
+        mock_get.return_value = 9
+        config = {
+            "parameters": {"retry_interval": 0},
+            "arguments": {
+                "inputs": {
+                    "sensor": {
+                        "type": "int",
+                        "value": 0,
+                        "link": "EXT:S",
+                        "link_mode": "monitor",
+                    },
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._link_connected["sensor"] = False
+        task.pvs["CLEAR"] = MagicMock()
+        task.pvs["CONN_INP"] = MagicMock()
+
+        task._on_clear(1)
+
+        mock_get.assert_called_with("EXT:S", timeout=5.0)
+        assert task._link_connected["sensor"] is True
+        assert task.link_values["sensor"] == 9
+
+    def test_disconnect_alarms_outputs_depending_on_that_input(self):
+        """Outputs driven by logic using a disconnected input should enter alarm."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {
+                        "type": "int",
+                        "value": 0,
+                        "link": "EXT:S",
+                        "link_mode": "monitor",
+                    },
+                    "other": {
+                        "type": "int",
+                        "value": 0,
+                        "link": "EXT:O",
+                        "link_mode": "monitor",
+                    },
+                },
+                "outputs": {
+                    "OUT_A": {"type": "bool", "value": 0},
+                    "OUT_B": {"type": "bool", "value": 0},
+                    "MSG": {"type": "string", "value": ""},
+                },
+            },
+            "rules": [
+                {
+                    "id": "RA",
+                    "condition": "sensor == 1",
+                    "message": "sensor active",
+                    "message_pv": "MSG",
+                    "outputs": {"OUT_A": 1},
+                },
+                {
+                    "id": "RB",
+                    "condition": "other == 1",
+                    "outputs": {"OUT_B": 1},
+                },
+            ],
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._link_connected["sensor"] = True
+        task._link_connected["other"] = True
+
+        task.pvs["OUT_A"] = MagicMock()
+        task.pvs["OUT_B"] = MagicMock()
+        task.pvs["MSG"] = MagicMock()
+
+        sensor_spec = spec.inputs["sensor"]
+        conn_cb = task._make_conn_callback("sensor", sensor_spec)
+        conn_cb(False)
+
+        assert task.pvs["OUT_A"].set_alarm.called
+        assert task.pvs["MSG"].set_alarm.called
+
     @patch("iocmng.core.pv_client.monitor")
     @patch("iocmng.core.pv_client.init")
     def test_start_link_monitors_passes_conn_callback(self, mock_init, mock_monitor):

@@ -6,6 +6,7 @@ User applications should subclass TaskBase and implement the required
 abstract methods: initialize(), execute(), and cleanup().
 """
 
+import ast
 import datetime
 import logging
 import threading
@@ -137,6 +138,11 @@ class TaskBase(ABC):
         self._link_connected: Dict[str, bool] = {}
         # Whether link monitors are currently registered in pv_client.
         self._link_monitors_active = False
+        # Per-link retry timers for stronger reconnect handling.
+        self._link_retry_timers: Dict[str, float] = {}
+        # Outputs currently forced into alarm because one of their logic inputs
+        # is disconnected.
+        self._forced_alarm_outputs: set = set()
         # ── Latch tracking ───────────────────────────────────────────
         # Set of output PV names whose value has been latched by a fired rule.
         self._latched_outputs: set = set()
@@ -331,6 +337,7 @@ class TaskBase(ABC):
                 if not self.enabled:
                     time.sleep(0.1)
                     continue
+                self._retry_disconnected_links()
                 self.step_cycle()
                 time.sleep(interval)
         except Exception as e:
@@ -508,6 +515,8 @@ class TaskBase(ABC):
             self._latched_outputs.clear()
         else:
             self.logger.info("CLEAR: no outputs currently latched")
+        # Force a reconnect probe for any currently disconnected inputs.
+        self._retry_disconnected_links(force=True, inputs_only=True)
         # Auto-reset the CLEAR PV back to 0
         if "CLEAR" in self.pvs:
             self.pvs["CLEAR"].set(0)
@@ -528,6 +537,7 @@ class TaskBase(ABC):
                 pass
         # 3. Re-run initial connectivity check
         self._initial_connectivity_check()
+        self._retry_disconnected_links(force=True, inputs_only=True)
         # Auto-reset the RESET PV back to 0
         if "RESET" in self.pvs:
             self.pvs["RESET"].set(0)
@@ -701,6 +711,7 @@ class TaskBase(ABC):
             self.set_message(f"All {total} inputs connected")
 
         self._refresh_system_connection_status()
+        self._refresh_output_dependency_alarms()
 
     def _start_link_monitors(self):
         """Set up pv_client monitors for all wired PVs with mode=monitor."""
@@ -745,9 +756,11 @@ class TaskBase(ABC):
             # A received monitor update is proof that the link is alive.
             if self._link_connected.get(name) is not True:
                 self._link_connected[name] = True
+                self._link_retry_timers.pop(name, None)
                 direction = "input" if spec.direction == "input" else "output"
                 self._update_conn_pv(direction)
                 self._refresh_system_connection_status()
+                self._refresh_output_dependency_alarms()
             # Update local PV mirror if it exists
             if name in self.pvs:
                 try:
@@ -774,10 +787,13 @@ class TaskBase(ABC):
             if connected != old:
                 if connected:
                     self.logger.info("[conn] %s (%s) CONNECTED", name, spec.link)
+                    self._link_retry_timers.pop(name, None)
                 else:
                     self.logger.warning("[conn] %s (%s) DISCONNECTED", name, spec.link)
+                    self._link_retry_timers[name] = 0.0
                 self._update_conn_pv(direction)
                 self._refresh_system_connection_status()
+                self._refresh_output_dependency_alarms()
         return _conn_cb
 
     def _update_conn_pv(self, direction: str) -> None:
@@ -814,6 +830,62 @@ class TaskBase(ABC):
             pass
         self._set_record_alarm(pv, active=bool(disconnected))
 
+    def _get_expression_names(self, expression: str) -> set:
+        """Return identifier names referenced in a rule or transform expression."""
+        try:
+            tree = ast.parse(expression, mode="eval")
+        except SyntaxError:
+            return set()
+        return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+
+    def _get_disconnected_logic_outputs(self) -> set:
+        """Return outputs whose logic depends on currently disconnected inputs."""
+        disconnected_inputs = {
+            name for name in self._wired_input_names
+            if self._link_connected.get(name) is False
+        }
+        if not disconnected_inputs:
+            return set()
+
+        input_names = set(self.plugin_spec.inputs.keys())
+        affected = set()
+
+        for transform in self.plugin_spec.transforms:
+            refs = self._get_expression_names(transform.expression) & input_names
+            if refs & disconnected_inputs:
+                affected.add(transform.output)
+
+        for rule in self.plugin_spec.rules:
+            refs = self._get_expression_names(rule.condition) & input_names
+            if refs & disconnected_inputs:
+                affected.update(rule.outputs.keys())
+                if rule.message_pv:
+                    affected.add(rule.message_pv)
+
+        return affected
+
+    def _refresh_output_dependency_alarms(self) -> None:
+        """Force alarms on outputs whose logic depends on disconnected inputs."""
+        active_outputs = self._get_disconnected_logic_outputs()
+
+        for pv_name in active_outputs:
+            pv = self.pvs.get(pv_name)
+            if pv is None:
+                continue
+            self._set_record_alarm(pv, active=True)
+
+        for pv_name in list(self._forced_alarm_outputs - active_outputs):
+            pv = self.pvs.get(pv_name)
+            if pv is None:
+                continue
+            try:
+                current = pv.get()
+                pv.set(current)
+            except Exception:
+                self._set_record_alarm(pv, active=False)
+
+        self._forced_alarm_outputs = set(active_outputs)
+
     def _set_record_alarm(self, pv: Any, active: bool) -> None:
         """Set or clear EPICS alarm severity on a record when supported."""
         setter = getattr(pv, "set_alarm", None) or getattr(pv, "setAlarm", None)
@@ -837,12 +909,79 @@ class TaskBase(ABC):
             except Exception:
                 pass
 
+    def _retry_disconnected_links(self, force: bool = False, inputs_only: bool = False) -> None:
+        """Actively probe disconnected links and re-arm monitors when possible."""
+        from iocmng.core import pv_client
+
+        timeout = float(self.parameters.get("timeout", 5.0))
+        retry_interval = float(
+            self.parameters.get("retry_interval", max(1.0, float(self.parameters.get("interval", 1.0))))
+        )
+        now = time.monotonic()
+
+        for name, spec in self._all_wired():
+            if inputs_only and spec.direction != "input":
+                continue
+            if self._link_connected.get(name) is not False:
+                continue
+            if not force:
+                last = self._link_retry_timers.get(name)
+                if last is not None and (now - last) < retry_interval:
+                    continue
+            self._link_retry_timers[name] = now
+
+            if spec.link_mode == "monitor" and self._link_monitors_active:
+                try:
+                    pv_client.unmonitor(f"_link_{name}")
+                except Exception:
+                    pass
+                try:
+                    pv_client.monitor(
+                        spec.link,
+                        callback=self._make_link_callback(name, spec),
+                        name=f"_link_{name}",
+                        conn_callback=self._make_conn_callback(name, spec),
+                    )
+                except Exception as exc:
+                    self.logger.debug("[retry] monitor refresh failed for %s (%s): %s", name, spec.link, exc)
+
+            try:
+                value = pv_client.get(spec.link, timeout=timeout)
+            except Exception as exc:
+                self.logger.warning("[retry] %s (%s) still disconnected: %s", name, spec.link, exc)
+                continue
+
+            old = self.link_values.get(name, spec.value)
+            self.link_values[name] = value
+            self._buffer_append(name, value)
+            self._link_connected[name] = True
+            self._link_retry_timers.pop(name, None)
+            direction = "input" if spec.direction == "input" else "output"
+            self._update_conn_pv(direction)
+            self._refresh_system_connection_status()
+            self._refresh_output_dependency_alarms()
+            if name in self.pvs:
+                try:
+                    self.pvs[name].set(value)
+                except Exception:
+                    pass
+            if spec.trigger and value != old:
+                self._link_prev[name] = old
+                try:
+                    self.on_input_changed(name, value, old)
+                except Exception as exc:
+                    self.logger.error("on_input_changed(%s) error: %s", name, exc)
+            self.logger.info("[retry] %s (%s) RECONNECTED = %s", name, spec.link, value)
+
     def _poll_links(self):
         """Read all wired PVs with mode=poll (called from _run_wrapper)."""
         from iocmng.core import pv_client
 
         timeout = float(self.parameters.get("timeout", 5.0))
         now = time.monotonic()
+
+        # Even monitor-mode links get actively probed when disconnected.
+        self._retry_disconnected_links()
 
         for name, spec in self._all_wired():
             if spec.link_mode != "poll":
@@ -859,16 +998,20 @@ class TaskBase(ABC):
                 self.logger.warning("link poll failed: %s (%s): %s", name, spec.link, exc)
                 if self._link_connected.get(name) is not False:
                     self._link_connected[name] = False
+                    self._link_retry_timers[name] = 0.0
                     direction = "input" if spec.direction == "input" else "output"
                     self._update_conn_pv(direction)
                     self._refresh_system_connection_status()
+                    self._refresh_output_dependency_alarms()
                 continue
             # Mark connected (update array PV only on state change)
             if not self._link_connected.get(name):
                 self._link_connected[name] = True
+                self._link_retry_timers.pop(name, None)
                 direction = "input" if spec.direction == "input" else "output"
                 self._update_conn_pv(direction)
                 self._refresh_system_connection_status()
+                self._refresh_output_dependency_alarms()
             old = self.link_values.get(name)
             self.link_values[name] = value
             self._buffer_append(name, value)
@@ -969,6 +1112,8 @@ class TaskBase(ABC):
             for pv_name in list(self._clear_inhibit):
                 if pv_name not in fired_outputs:
                     self._clear_inhibit.discard(pv_name)
+
+        self._refresh_output_dependency_alarms()
 
     def _fire_rule(self, rule: RuleSpec):
         """Execute the actions for a fired rule."""

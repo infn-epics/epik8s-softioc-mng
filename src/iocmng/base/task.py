@@ -700,11 +700,7 @@ class TaskBase(ABC):
             self.logger.info("[init-conn] All %d inputs reachable.", total)
             self.set_message(f"All {total} inputs connected")
 
-        if "SYS_CONN" in self.pvs:
-            try:
-                self.pvs["SYS_CONN"].set(conn_msg)
-            except Exception:
-                pass
+        self._refresh_system_connection_status()
 
     def _start_link_monitors(self):
         """Set up pv_client monitors for all wired PVs with mode=monitor."""
@@ -746,6 +742,12 @@ class TaskBase(ABC):
             old = self.link_values.get(name)
             self.link_values[name] = value
             self._buffer_append(name, value)
+            # A received monitor update is proof that the link is alive.
+            if self._link_connected.get(name) is not True:
+                self._link_connected[name] = True
+                direction = "input" if spec.direction == "input" else "output"
+                self._update_conn_pv(direction)
+                self._refresh_system_connection_status()
             # Update local PV mirror if it exists
             if name in self.pvs:
                 try:
@@ -775,6 +777,7 @@ class TaskBase(ABC):
                 else:
                     self.logger.warning("[conn] %s (%s) DISCONNECTED", name, spec.link)
                 self._update_conn_pv(direction)
+                self._refresh_system_connection_status()
         return _conn_cb
 
     def _update_conn_pv(self, direction: str) -> None:
@@ -796,6 +799,43 @@ class TaskBase(ABC):
             self.pvs[pv_key].set(arr)
         except Exception:
             pass
+
+    def _refresh_system_connection_status(self) -> None:
+        """Refresh SYS_CONN with the current live connectivity summary."""
+        if "SYS_CONN" not in self.pvs:
+            return
+        names = self._wired_input_names + self._wired_output_names
+        disconnected = [n for n in names if self._link_connected.get(n) is False]
+        msg = "OK" if not disconnected else f"DISCONNECTED: {', '.join(disconnected)}"
+        pv = self.pvs["SYS_CONN"]
+        try:
+            pv.set(str(msg)[:39])
+        except Exception:
+            pass
+        self._set_record_alarm(pv, active=bool(disconnected))
+
+    def _set_record_alarm(self, pv: Any, active: bool) -> None:
+        """Set or clear EPICS alarm severity on a record when supported."""
+        setter = getattr(pv, "set_alarm", None) or getattr(pv, "setAlarm", None)
+        if not callable(setter):
+            return
+        try:
+            from softioc import alarm
+            if active:
+                status = getattr(alarm, "HIGH_ALARM", getattr(alarm, "STATE_ALARM", 0))
+                severity = getattr(alarm, "MAJOR_ALARM", getattr(alarm, "INVALID_ALARM", 0))
+            else:
+                status = getattr(alarm, "NO_ALARM", 0)
+                severity = getattr(alarm, "NO_ALARM", 0)
+            setter(status, severity)
+        except Exception:
+            try:
+                if active:
+                    setter("HIGH", "MAJOR")
+                else:
+                    setter("NO_ALARM", "NO_ALARM")
+            except Exception:
+                pass
 
     def _poll_links(self):
         """Read all wired PVs with mode=poll (called from _run_wrapper)."""
@@ -821,12 +861,14 @@ class TaskBase(ABC):
                     self._link_connected[name] = False
                     direction = "input" if spec.direction == "input" else "output"
                     self._update_conn_pv(direction)
+                    self._refresh_system_connection_status()
                 continue
             # Mark connected (update array PV only on state change)
             if not self._link_connected.get(name):
                 self._link_connected[name] = True
                 direction = "input" if spec.direction == "input" else "output"
                 self._update_conn_pv(direction)
+                self._refresh_system_connection_status()
             old = self.link_values.get(name)
             self.link_values[name] = value
             self._buffer_append(name, value)

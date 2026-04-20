@@ -1144,6 +1144,64 @@ class TestConnectionTracking:
         assert task._link_connected["sensor"] is True
         mock_conn_pv.set.assert_called_with([1])
 
+    def test_monitor_value_callback_restores_connected_state(self):
+        """A monitor value update should mark the link connected again."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S", "link_mode": "monitor"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._link_connected["sensor"] = False
+
+        mock_conn_pv = MagicMock()
+        task.pvs["CONN_INP"] = mock_conn_pv
+
+        sensor_spec = spec.inputs["sensor"]
+        cb = task._make_link_callback("sensor", sensor_spec)
+        cb(7)
+
+        assert task._link_connected["sensor"] is True
+        mock_conn_pv.set.assert_called_with([1])
+
+    def test_sys_conn_updates_live_on_connection_changes(self):
+        """SYS_CONN should reflect live disconnect/reconnect events."""
+        config = {
+            "arguments": {
+                "inputs": {
+                    "sensor": {"type": "int", "value": 0, "link": "EXT:S", "link_mode": "monitor"},
+                },
+                "outputs": {
+                    "SYS_CONN": {"type": "string", "value": "Initializing"},
+                },
+            },
+        }
+        spec = PluginSpec.from_config(config)
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task._link_connected["sensor"] = True
+
+        mock_conn_pv = MagicMock()
+        mock_sys_pv = MagicMock()
+        task.pvs["CONN_INP"] = mock_conn_pv
+        task.pvs["SYS_CONN"] = mock_sys_pv
+
+        sensor_spec = spec.inputs["sensor"]
+        conn_cb = task._make_conn_callback("sensor", sensor_spec)
+        val_cb = task._make_link_callback("sensor", sensor_spec)
+
+        conn_cb(False)
+        mock_sys_pv.set.assert_called_with("DISCONNECTED: sensor")
+        assert mock_sys_pv.set_alarm.called
+
+        val_cb(1)
+        mock_sys_pv.set.assert_called_with("OK")
+        assert mock_sys_pv.set_alarm.call_count >= 2
+
     @patch("iocmng.core.pv_client.get")
     @patch("iocmng.core.pv_client.init")
     def test_poll_links_tracks_connection_loss(self, mock_init, mock_get):

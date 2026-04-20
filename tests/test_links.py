@@ -1305,7 +1305,7 @@ class TestConnectionTracking:
 
         task._poll_links()
 
-        mock_get.assert_called_with("EXT:S", timeout=5.0)
+        mock_get.assert_called_with("EXT:S", timeout=2.0)
         assert task._link_connected["sensor"] is True
         assert task.link_values["sensor"] == 77
         mock_conn_pv.set.assert_called_with([1])
@@ -1341,7 +1341,7 @@ class TestConnectionTracking:
 
         task._on_clear(1)
 
-        mock_get.assert_called_with("EXT:S", timeout=5.0)
+        mock_get.assert_called_with("EXT:S", timeout=2.0)
         assert task._link_connected["sensor"] is True
         assert task.link_values["sensor"] == 9
 

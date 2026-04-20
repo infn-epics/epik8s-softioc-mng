@@ -910,10 +910,21 @@ class TaskBase(ABC):
                 pass
 
     def _retry_disconnected_links(self, force: bool = False, inputs_only: bool = False) -> None:
-        """Actively probe disconnected links and re-arm monitors when possible."""
+        """Actively probe disconnected links and re-arm monitors when possible.
+
+        NOTE: We intentionally do NOT cycle (unmonitor/monitor) existing
+        subscriptions.  Destroying the underlying ``epics.PV`` object on every
+        retry prevents PyEPICS from completing its internal CA search /
+        reconnect handshake.  Instead we leave the subscription in place and
+        only issue a lightweight ``caget`` probe with a short timeout.  When
+        the probe succeeds we know the IOC is back and the existing monitor
+        will resume delivering updates on its own.
+        """
         from iocmng.core import pv_client
 
-        timeout = float(self.parameters.get("timeout", 5.0))
+        # Use a shorter timeout for retry probes to avoid long serial blocking
+        # when many PVs are disconnected (e.g. 13 PVs × 5 s = 65 s).
+        retry_timeout = min(float(self.parameters.get("timeout", 5.0)), 2.0)
         retry_interval = float(
             self.parameters.get("retry_interval", max(1.0, float(self.parameters.get("interval", 1.0))))
         )
@@ -930,23 +941,10 @@ class TaskBase(ABC):
                     continue
             self._link_retry_timers[name] = now
 
-            if spec.link_mode == "monitor" and self._link_monitors_active:
-                try:
-                    pv_client.unmonitor(f"_link_{name}")
-                except Exception:
-                    pass
-                try:
-                    pv_client.monitor(
-                        spec.link,
-                        callback=self._make_link_callback(name, spec),
-                        name=f"_link_{name}",
-                        conn_callback=self._make_conn_callback(name, spec),
-                    )
-                except Exception as exc:
-                    self.logger.debug("[retry] monitor refresh failed for %s (%s): %s", name, spec.link, exc)
-
+            # Do NOT touch the existing monitor subscription — let PyEPICS
+            # handle auto-reconnect internally.  Just probe with caget.
             try:
-                value = pv_client.get(spec.link, timeout=timeout)
+                value = pv_client.get(spec.link, timeout=retry_timeout)
             except Exception as exc:
                 self.logger.warning("[retry] %s (%s) still disconnected: %s", name, spec.link, exc)
                 continue

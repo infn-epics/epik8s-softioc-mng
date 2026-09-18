@@ -200,6 +200,8 @@ class BeamlineController:
         # Get IOC configurations from values.yaml
         epics_config = self.beamline_values.get("epicsConfiguration", {})
         iocs = epics_config.get("iocs", [])
+        if isinstance(iocs, dict):
+            iocs = [{"name": name, **config} for name, config in iocs.items()]
 
         for ioc_config in iocs:
             ioc_name = ioc_config.get("name")

@@ -10,6 +10,7 @@ A pluggable task/job framework for EPICS soft IOC applications on Kubernetes. Pr
 - **Wired inputs/outputs** — automatically read/write external PVs (poll or monitor)
 - **Connection tracking** — `CONN_INP` / `CONN_OUT` waveform PVs show live CA/PVA connection state per port
 - **Declarative rules** — safe boolean expressions that fire actuators and set outputs
+- **Rule tolerance** — `tolerance: <seconds>` fires a rule only after its condition has stayed true for that long, filtering short glitches (default `0`, immediate)
 - **Output latch** — `latch: true` holds an output value until an operator writes `CLEAR`; `latch_dir` selects which transition latches (rise / fall / any)
 - **ALARM severity** — `alarm_on: MAJOR|MINOR` wires EPICS alarm fields directly from config
 - **Transforms** — computed outputs using built-in math/statistics/array functions
@@ -146,6 +147,7 @@ rule_defaults:
 rules:
   - id: OVER_TEMP
     condition: "mean(temp_buf) > 80 or pressure > 2.0"
+    tolerance: 60                  # Optional: condition must stay true for 60 s before firing
     message: "Temperature or pressure limit exceeded"
     outputs:
       alarm: 1

@@ -2280,3 +2280,117 @@ class TestLatchDir:
         task.link_values = {"sensor": 0}
         task._evaluate_rules()
         assert "ALARM" in task._latched_outputs
+
+
+# ---------------------------------------------------------------------------
+# Rule tolerance
+# ---------------------------------------------------------------------------
+
+class TestRuleTolerance:
+    @staticmethod
+    def _make_task(tolerance, extra=None):
+        rule = {
+            "condition": "sensor == 0",
+            "actuators": {"sensor": 1},
+            "outputs": {"alarm": 1},
+        }
+        if tolerance is not None:
+            rule["tolerance"] = tolerance
+        spec = PluginSpec.from_config({
+            "arguments": {
+                "inputs": {"sensor": {"type": "int", "value": 0, "link": "EXT:SENSOR"}},
+                "outputs": {"alarm": {"type": "bool", "value": 0}},
+            },
+            "rule_defaults": {"alarm": 0},
+            "rules": [rule] + (extra or []),
+        })
+        task = LinkTask(name="test", plugin_spec=spec)
+        task.initialize()
+        task.link_put = MagicMock()
+        return task
+
+    @staticmethod
+    def _evaluate(task, at, sensor):
+        task.link_values = {"sensor": sensor}
+        with patch("iocmng.base.task.time.monotonic", return_value=at):
+            task._evaluate_rules()
+        return task.link_put.call_count
+
+    def test_defaults_to_zero_and_round_trips(self):
+        assert RuleSpec.from_config({"id": "A", "condition": "x"}).tolerance == 0
+        assert "tolerance" not in RuleSpec.from_config({"id": "A", "condition": "x"}).to_dict()
+        assert RuleSpec.from_config({"id": "A", "condition": "x", "tolerance": 60}).to_dict()["tolerance"] == 60
+
+    @pytest.mark.parametrize("bad", [-1, "abc", float("nan"), float("inf")])
+    def test_invalid_tolerance_rejected(self, bad):
+        with pytest.raises(ValueError):
+            RuleSpec.from_config({"id": "A", "condition": "x", "tolerance": bad})
+
+    @pytest.mark.parametrize("tolerance", [None, 0])
+    def test_no_tolerance_fires_immediately(self, tolerance):
+        task = self._make_task(tolerance)
+        assert self._evaluate(task, 100, 0) == 1
+
+    def test_fires_only_after_tolerance(self):
+        task = self._make_task(60)
+        assert self._evaluate(task, 100, 0) == 0
+        assert self._evaluate(task, 159.9, 0) == 0
+        assert self._evaluate(task, 160, 0) == 1
+
+    def test_glitch_restarts_wait(self):
+        task = self._make_task(60)
+        self._evaluate(task, 100, 0)
+        self._evaluate(task, 150, 1)
+        assert self._evaluate(task, 151, 0) == 0
+        assert self._evaluate(task, 210, 0) == 0
+        assert self._evaluate(task, 211, 0) == 1
+
+    def test_keeps_firing_then_rearms(self):
+        task = self._make_task(60)
+        self._evaluate(task, 100, 0)
+        self._evaluate(task, 160, 0)
+        assert self._evaluate(task, 161, 0) == 2
+        self._evaluate(task, 162, 1)
+        assert self._evaluate(task, 163, 0) == 2
+        assert self._evaluate(task, 223, 0) == 3
+
+    def test_rules_without_ids_have_independent_timers(self):
+        extra = [{"condition": "sensor == 0", "tolerance": 10, "actuators": {"sensor": 2}}]
+        task = self._make_task(60, extra)
+        self._evaluate(task, 100, 0)
+        self._evaluate(task, 110, 0)
+        task.link_put.assert_called_once_with("sensor", 2, timeout=5.0)
+
+    def test_output_stays_default_while_waiting(self):
+        task = self._make_task(60)
+        task.pvs["alarm"] = MagicMock()
+        self._evaluate(task, 100, 0)
+        task.pvs["alarm"].set.assert_called_once_with(0)
+
+    def test_disable_restarts_wait(self):
+        task = self._make_task(60)
+        self._evaluate(task, 100, 0)
+        task.enabled = False
+        task.running = True
+
+        def stop(_):
+            task.running = False
+
+        with patch("iocmng.base.task.time.sleep", side_effect=stop):
+            task._run_wrapper()
+        assert task._rule_hold_start == {}
+        assert self._evaluate(task, 500, 0) == 0
+
+    def test_reactive_heartbeat_fires_pending_rule(self):
+        task = self._make_task(60)
+        self._evaluate(task, 100, 0)
+        task.running = True
+
+        def stop(_):
+            task.running = False
+
+        with patch("iocmng.base.task.time.sleep", side_effect=stop), \
+                patch("iocmng.base.task.time.monotonic", return_value=160), \
+                patch.object(task, "_retry_disconnected_links"):
+            task._reactive_heartbeat()
+        assert task.link_put.call_count == 1

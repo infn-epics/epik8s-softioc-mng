@@ -201,6 +201,8 @@ class RuleSpec:
 
     ``actuators`` maps input keys to the value to write when the rule fires.
     ``outputs`` maps output PV names to values to set locally.
+    ``tolerance`` is how long, in seconds, the condition must stay true
+    before the rule fires.  ``0`` fires on the first true evaluation.
     """
 
     id: str
@@ -209,18 +211,25 @@ class RuleSpec:
     message_pv: Optional[str] = None
     actuators: Dict[str, Any] = field(default_factory=dict)
     outputs: Dict[str, Any] = field(default_factory=dict)
+    tolerance: float = 0.0
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "RuleSpec":
         raw = _mapping(config)
         msg_pv = raw.get("message_pv") or None
+        rule_id = str(raw.get("id", ""))
+        tolerance = float(raw.get("tolerance", 0) or 0)
+        # Written so that NaN is rejected too.
+        if not 0 <= tolerance < float("inf"):
+            raise ValueError(f"Rule {rule_id!r}: tolerance must be a finite number >= 0, got {tolerance}")
         return cls(
-            id=str(raw.get("id", "")),
+            id=rule_id,
             condition=str(raw.get("condition", "False")),
             message=str(raw.get("message", "")),
             message_pv=str(msg_pv) if msg_pv else None,
             actuators=_mapping(raw.get("actuators")),
             outputs=_mapping(raw.get("outputs")),
+            tolerance=tolerance,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -233,6 +242,8 @@ class RuleSpec:
             d["actuators"] = dict(self.actuators)
         if self.outputs:
             d["outputs"] = dict(self.outputs)
+        if self.tolerance:
+            d["tolerance"] = self.tolerance
         return d
 
 

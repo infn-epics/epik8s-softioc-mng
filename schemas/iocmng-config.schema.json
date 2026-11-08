@@ -253,6 +253,12 @@
           "type": "string",
           "description": "Output PV name to write a timestamped message to when the rule fires."
         },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Seconds the condition must stay continuously true before the rule fires. 0 fires immediately."
+        },
         "actuators": {
           "type": "object",
           "description": "Map of input keys to values to write to their linked external PVs.",

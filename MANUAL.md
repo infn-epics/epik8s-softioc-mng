@@ -666,6 +666,9 @@ Examples:
 | `message_pv` | string | No | Output PV for timestamped message |
 | `outputs` | dict | No | Map of output PV names → values to set |
 | `actuators` | dict | No | Map of input keys → values to write to their linked external PVs |
+| `tolerance` | number | No | Seconds the condition must stay continuously true before the rule fires (default `0`, immediate) |
+
+With a `tolerance`, a condition that goes false restarts the wait, so a short glitch never fires the rule. The rule fires on the first evaluation after the tolerance has elapsed, so in continuous mode it can be up to one `interval` late. Disabling the task also restarts the wait.
 
 ---
 

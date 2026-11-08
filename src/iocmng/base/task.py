@@ -151,6 +151,10 @@ class TaskBase(ABC):
         # when the rule condition that drives the output goes *false* for
         # one cycle, so a new rising-edge can re-arm the latch naturally.
         self._clear_inhibit: set = set()
+        # Rule tolerance tracking, keyed by rule index: monotonic time the
+        # condition became true, or None once the tolerance has elapsed.
+        # An entry exists only while the condition stays true.
+        self._rule_hold_start: Dict[int, Optional[float]] = {}
         # Pending CLEAR/RESET requests captured from control-PV callbacks.
         # They are applied from the task thread to avoid cross-thread races
         # with rule evaluation while still never missing short push pulses.
@@ -311,6 +315,7 @@ class TaskBase(ABC):
                 self._sync_control_pvs_from_pv()
                 self._apply_pending_control_actions()
                 if not self.enabled:
+                    self._rule_hold_start.clear()
                     time.sleep(0.1)
                     continue
                 self._poll_links()
@@ -335,9 +340,14 @@ class TaskBase(ABC):
                 self._sync_control_pvs_from_pv()
                 self._apply_pending_control_actions()
                 if not self.enabled:
+                    self._rule_hold_start.clear()
                     time.sleep(0.1)
                     continue
                 self._retry_disconnected_links()
+                # Input callbacks only evaluate rules on a change, so a rule
+                # waiting out its tolerance must be re-checked from here.
+                if any(start is not None for start in list(self._rule_hold_start.values())):
+                    self._evaluate_rules()
                 self.step_cycle()
                 time.sleep(interval)
         except Exception as e:
@@ -1095,9 +1105,10 @@ class TaskBase(ABC):
 
         # Outputs written by at least one fired rule in this cycle.
         fired_outputs = set()
-        for rule in rules:
+        for index, rule in enumerate(rules):
             try:
-                if safe_eval(rule.condition, self._build_eval_context()):
+                condition = bool(safe_eval(rule.condition, self._build_eval_context()))
+                if self._rule_ready_to_fire(index, rule, condition):
                     fired_outputs.update(rule.outputs.keys())
                     self._fire_rule(rule)
             except Exception as exc:
@@ -1112,6 +1123,28 @@ class TaskBase(ABC):
                     self._clear_inhibit.discard(pv_name)
 
         self._refresh_output_dependency_alarms()
+
+    def _rule_ready_to_fire(self, index: int, rule: RuleSpec, condition: bool) -> bool:
+        """Apply the rule's tolerance to its current condition value.
+
+        Once the tolerance has elapsed the rule keeps firing every evaluation
+        while the condition stays true, like a rule with no tolerance.
+        """
+        if rule.tolerance <= 0:
+            return condition
+        if not condition:
+            if self._rule_hold_start.pop(index, None) is not None:
+                self.logger.info("Rule %s condition cleared within tolerance, not fired", rule.id)
+            return False
+        now = time.monotonic()
+        if index not in self._rule_hold_start:
+            self._rule_hold_start[index] = now
+            self.logger.info("Rule %s condition true, firing in %gs if it persists", rule.id, rule.tolerance)
+        start = self._rule_hold_start[index]
+        if start is not None and now - start < rule.tolerance:
+            return False
+        self._rule_hold_start[index] = None
+        return True
 
     def _fire_rule(self, rule: RuleSpec):
         """Execute the actions for a fired rule."""

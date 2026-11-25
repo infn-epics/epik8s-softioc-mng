@@ -81,12 +81,14 @@ def _init_softioc(instance):
     Separated from :func:`run_ioc` so tests can mock this single call
     instead of dealing with ``softioc.builder``/``softioc.softioc`` directly.
     """
-    from softioc import softioc, builder
+    from softioc import builder
+
+    from iocmng.core.softioc_runtime import ioc_init
 
     builder.SetDeviceName(instance.pv_prefix)
     instance.build_pvs()
     builder.LoadDatabase()
-    softioc.iocInit()
+    ioc_init()
 
 
 def run_ioc(

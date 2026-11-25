@@ -1216,6 +1216,7 @@ SPARC:CONTROL:CHECK_MOTOR:SHUTTER_CMD   (custom output)
 | `IOCMNG_DISABLE_OPHYD` | `true` | Skip ophyd initialization |
 | `IOCMNG_PVA` | `true` | Use PVA (true) or CA (false) |
 | `IOCMNG_LOG_LEVEL` | `info` | Logging level |
+| `IOCMNG_DISPATCHER` | `asyncio` | Soft IOC dispatcher: `asyncio`, or `cothread` (needs `pip install 'iocmng[cothread]'`) |
 
 ---
 

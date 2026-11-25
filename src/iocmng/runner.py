@@ -38,12 +38,17 @@ logger = logging.getLogger(__name__)
 
 # Sentinel used to block the main thread until SIGINT / SIGTERM.
 _shutdown = False
+# The running plugin, told to stop from the signal handler.
+_instance = None
 
 
 def _signal_handler(sig, frame):
     global _shutdown
     logger.info("Received signal %s — shutting down", sig)
     _shutdown = True
+    request_stop = getattr(_instance, "request_stop", None)
+    if request_stop is not None:
+        request_stop()
 
 
 def _load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
@@ -119,7 +124,7 @@ def run_ioc(
         name: IOC name.  Defaults to the class name in lower-case.
         pvout: Path to write the list of PV names (one per line).
     """
-    global _shutdown
+    global _shutdown, _instance
     _shutdown = False
 
     # ── Resolve configuration ────────────────────────────────────────
@@ -177,6 +182,7 @@ def run_ioc(
         logger.info("Wrote %d PVs to %s", len(pv_names), pvout)
 
     # ── Register signal handlers ─────────────────────────────────────
+    _instance = instance
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 

@@ -95,6 +95,9 @@ class TaskBase(ABC):
         self.enabled = True
         self.running = False
         self.task_lock = threading.Lock()
+        # Set by request_stop() (e.g. from a signal handler) so long startup
+        # work, such as the initial connectivity check, can give up early.
+        self._stop_requested = threading.Event()
 
         # PV prefix
         self.plugin_prefix = self.plugin_spec.prefix or self.name.upper()
@@ -310,6 +313,8 @@ class TaskBase(ABC):
         # Initial connectivity check: poll all wired inputs once to seed
         # link_values and surface disconnected PVs before monitors take over.
         self._initial_connectivity_check()
+        if self._stop_requested.is_set():
+            return
 
         # Start link monitors for wired inputs with mode=monitor
         self._start_link_monitors()
@@ -377,9 +382,19 @@ class TaskBase(ABC):
         except Exception as e:
             self.logger.error(f"Reactive heartbeat error: {e}", exc_info=True)
 
+    def request_stop(self):
+        """Ask the task to stop; safe to call from a signal handler.
+
+        Startup work in progress (the initial connectivity check) ends after
+        the PV it is waiting for; call :meth:`stop` afterwards to clean up.
+        """
+        self._stop_requested.set()
+        self.running = False
+
     def stop(self):
         """Stop the task gracefully."""
         self.logger.info(f"Stopping task: {self.name}")
+        self._stop_requested.set()
         self.running = False
         self._stop_link_monitors()
         self._stop_driver()
@@ -889,6 +904,9 @@ class TaskBase(ABC):
                          sum(1 for _ in self._wired_inputs()))
 
         for name, spec in self._wired_inputs():
+            if self._stop_requested.is_set():
+                self.logger.info("[init-conn] Stop requested, check abandoned")
+                return
             try:
                 value = pv_client.get(spec.link, timeout=timeout)
                 self.link_values[name] = value

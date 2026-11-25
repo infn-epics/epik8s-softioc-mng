@@ -6,8 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
-VALID_PV_TYPES = {"float", "int", "string", "bool"}
+VALID_PV_TYPES = {"float", "int", "string", "bool", "enum", "waveform"}
 VALID_LINK_MODES = {"poll", "monitor"}
+VALID_SOURCES = {"driver"}
+VALID_ACCESS = {"ro", "rw", "cmd"}
+MAX_ENUM_CHOICES = 16      # mbbi/mbbo states
+MAX_ENUM_LENGTH = 25       # EPICS enum strings, without the terminator
+MAX_WAVEFORM_LENGTH = 1_000_000
 
 
 def deep_merge_dicts(base: Optional[Mapping[str, Any]], override: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -82,6 +87,19 @@ class PvArgumentSpec:
         When set to a positive integer, the framework keeps a ring buffer
         of the last *N* values.  The buffer is exposed as ``<name>_buf``
         in the expression evaluation context used by rules and transforms.
+    source
+        ``"driver"`` reads the value from the task's device driver each
+        cycle (``driver.read``) instead of an external PV.  ``None`` keeps
+        the behaviour above.
+    access
+        For driver PVs only: ``"ro"`` (default) is a readback, ``"rw"`` a
+        setting written with ``driver.write`` and read back each cycle,
+        ``"cmd"`` a write-only action sent with ``driver.command``.
+    choices
+        State names of an ``enum`` PV (2..16, at most 25 characters).
+    length
+        Number of elements of a ``waveform`` PV.  Waveforms are always
+        published at full length, NaN padded.
     """
 
     name: str
@@ -103,6 +121,11 @@ class PvArgumentSpec:
     latch: bool = False
     latch_dir: str = "rise"  # "rise" (0→1), "fall" (1→0), "any"
     alarm_on: str = ""       # EPICS alarm severity when output is active: "MAJOR", "MINOR"
+    # Driver source fields
+    source: Optional[str] = None   # "driver" or None
+    access: str = "ro"             # "ro", "rw", "cmd" (driver PVs)
+    choices: tuple = ()            # enum state names
+    length: Optional[int] = None   # waveform elements
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -127,6 +150,37 @@ class PvArgumentSpec:
         latch_dir = {"0->1": "rise", "1->0": "fall"}.get(latch_dir_raw, latch_dir_raw)
         alarm_on_raw = str(raw.get("alarm_on", "")).upper()
         alarm_on = alarm_on_raw if alarm_on_raw in ("MAJOR", "MINOR") else ""
+        source = raw.get("source") or None
+        if source is not None:
+            source = str(source).lower()
+            if source not in VALID_SOURCES:
+                raise ValueError(f"PV {name!r}: source must be one of {sorted(VALID_SOURCES)}, got {source!r}")
+            if link:
+                raise ValueError(f"PV {name!r}: a PV has either a link or a source, not both")
+        access = str(raw.get("access", "ro")).lower()
+        if access not in VALID_ACCESS:
+            raise ValueError(f"PV {name!r}: access must be one of {sorted(VALID_ACCESS)}, got {access!r}")
+        if access != "ro" and source != "driver":
+            raise ValueError(f"PV {name!r}: access {access!r} applies to driver PVs (source: driver)")
+        if access == "cmd" and pv_type not in ("bool", "enum"):
+            raise ValueError(f"PV {name!r}: a cmd PV is a bool (Idle/<name>)")
+        choices: tuple = ()
+        if pv_type == "enum":
+            choices = tuple(str(c) for c in raw.get("choices") or ())
+            if not 2 <= len(choices) <= MAX_ENUM_CHOICES:
+                raise ValueError(f"PV {name!r}: an enum needs 2..{MAX_ENUM_CHOICES} choices")
+            if any(len(c) > MAX_ENUM_LENGTH for c in choices):
+                raise ValueError(f"PV {name!r}: enum choices are at most {MAX_ENUM_LENGTH} characters")
+        length = None
+        if pv_type == "waveform":
+            try:
+                length = int(raw.get("length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            if not 1 <= length <= MAX_WAVEFORM_LENGTH:
+                raise ValueError(f"PV {name!r}: a waveform needs length (1..{MAX_WAVEFORM_LENGTH})")
+            if access != "ro":
+                raise ValueError(f"PV {name!r}: driver waveforms are read-only")
         return cls(
             name=name,
             direction=direction,
@@ -146,15 +200,27 @@ class PvArgumentSpec:
             latch=latch,
             latch_dir=latch_dir,
             alarm_on=alarm_on,
+            source=source,
+            access=access,
+            choices=choices,
+            length=length,
             raw=dict(raw),
         )
 
     @property
     def writable(self) -> bool:
+        # Driver PVs: settings and commands are written by clients
+        if self.driven:
+            return self.access in ("rw", "cmd")
         # Wired inputs are updated by the link engine, not by clients
         if self.wired:
             return False
         return self.direction == "input"
+
+    @property
+    def driven(self) -> bool:
+        """True if this PV is read from (and written to) the task's driver."""
+        return self.source == "driver"
 
     @property
     def wired(self) -> bool:
@@ -187,6 +253,13 @@ class PvArgumentSpec:
                 normalized["latch_dir"] = self.latch_dir
         if self.alarm_on:
             normalized["alarm_on"] = self.alarm_on
+        if self.source:
+            normalized["source"] = self.source
+            normalized["access"] = self.access
+        if self.choices:
+            normalized["choices"] = list(self.choices)
+        if self.length is not None:
+            normalized["length"] = self.length
         return normalized
 
 
@@ -399,6 +472,28 @@ def create_softioc_record(spec: PvArgumentSpec, on_update=None):
         if spec.writable:
             return builder.stringOut(spec.name, initial_value=str(spec.value), on_update=on_update)
         return builder.stringIn(spec.name, initial_value=str(spec.value))
+
+    if spec.type == "bool" and spec.access == "cmd":
+        # A write-only action: clients write 1, the task resets it to 0.
+        onam = spec.raw.get("onam") or spec.name
+        return builder.boolOut(spec.name, initial_value=0, ZNAM="Idle", ONAM=str(onam)[:MAX_ENUM_LENGTH],
+                               on_update=on_update)
+
+    if spec.type == "enum":
+        try:
+            initial = spec.choices.index(spec.value) if isinstance(spec.value, str) else int(spec.value or 0)
+        except ValueError:
+            initial = 0
+        if spec.writable:
+            return builder.mbbOut(spec.name, *spec.choices, initial_value=initial, on_update=on_update)
+        return builder.mbbIn(spec.name, *spec.choices, initial_value=initial)
+
+    if spec.type == "waveform":
+        import numpy as np
+        initial = np.full(spec.length, np.nan)
+        if spec.writable:
+            return builder.WaveformOut(spec.name, initial, on_update=on_update)
+        return builder.WaveformIn(spec.name, initial)
 
     if spec.type == "bool":
         kwargs = dict(

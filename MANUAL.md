@@ -29,6 +29,7 @@
 21. [PV Naming and Prefixes](#21-pv-naming-and-prefixes)
 22. [Environment Variables](#22-environment-variables)
 23. [JSON Schema](#23-json-schema)
+24. [Driver Source](#24-driver-source)
 
 ---
 
@@ -274,6 +275,8 @@ rules:
 | `int` | `longOut` / `longIn` | `int` | `value`, `low`, `high`, `alarm_on` |
 | `string` | `stringOut` / `stringIn` | `str` | `value` |
 | `bool` | `boolOut` / `boolIn` | `int` (0/1) | `value`, `znam`, `onam`, `alarm_on` |
+| `enum` | `mbbOut` / `mbbIn` | `int` (index) | `value`, `choices` (2..16 names, at most 25 characters) |
+| `waveform` | `WaveformOut` / `WaveformIn` | numpy array | `length` (always published full length, NaN padded) |
 
 ### PV Link Properties
 
@@ -284,6 +287,8 @@ rules:
 | `poll_rate` | float | — | Per-input poll interval (seconds) |
 | `trigger` | bool | `false` | Fire `on_input_changed()` on value change |
 | `buffer_size` | int | — | Ring buffer size (keep last N values) |
+| `source` | string | — | `"driver"`: read from the task's device driver instead of a `link` ([§24](#24-driver-source)) |
+| `access` | string | `"ro"` | Driver PVs: `"ro"` readback, `"rw"` setting, `"cmd"` write-only action |
 
 ### Output-only Properties
 
@@ -409,6 +414,7 @@ Every task automatically gets these PVs (all prefixed with the task's full PV pr
 | `RESET` | boolOut | Pulse-1 to clear latches + reset `CYCLE_COUNT` to 0 + re-run connectivity check |
 | `CONN_INP` | WaveformIn | Integer array: 1 = connected, 0 = disconnected, one element per wired input |
 | `CONN_OUT` | WaveformIn | Same as `CONN_INP` but for wired outputs |
+| `CONNECTED` | boolIn | Device connection state (`Disconnected` is a MAJOR alarm); tasks with driver PVs only |
 
 > `CLEAR` and `RESET` are polled on every loop iteration, so writes from any CA/PVA client are always observed.
 
@@ -1242,3 +1248,67 @@ parameters:
   mode: continuous
   ...
 ```
+
+---
+
+## 24. Driver Source
+
+A task can own a device: PVs with `source: driver` are read from, and written to, a device driver instead of external PVs. Rules, transforms, ring buffers, latches and `on_input_changed()` work on them exactly as on wired inputs, so a device IOC and its local interlocks fit in one config.
+
+### Configuration
+
+```yaml
+parameters:
+  mode: continuous          # or reactive: rules run on every driver value change
+  interval: 1.0
+  poll_period: 0.5          # seconds between driver reads (default: interval)
+  driver: tpg366_ioc.driver:TcpDriver
+  driver_args: {host: gauge01.lnf.infn.it, port: 8000}
+  # simulate: true          # built-in in-memory driver, no device needed
+
+arguments:
+  inputs:
+    Pressure: {type: float, source: driver, unit: mbar, prec: 3, buffer_size: 60}
+    Unit:     {type: enum, source: driver, access: rw, choices: [mbar, Torr, Pa]}
+    Trace:    {type: waveform, source: driver, length: 1024}
+    Reset:    {type: bool, source: driver, access: cmd}
+  outputs:
+    Leak: {type: bool, value: 0, znam: OK, onam: LEAK, latch: true, alarm_on: MAJOR}
+
+rules:
+  - {id: LEAK, condition: "mean(Pressure_buf) > 1e-3", tolerance: 10, outputs: {Leak: 1}}
+```
+
+| `access` | Record | Behaviour |
+|----------|--------|-----------|
+| `ro` (default) | `*In` | Read each poll; not writable by clients |
+| `rw` | `*Out` | A client write calls `driver.write(name, value)`; the value is read back each poll, so device-side changes reach clients |
+| `cmd` | `boolOut` `Idle`/`<name>` | Writing 1 calls `driver.command(name)`; the PV returns to `Idle` when the command is done |
+
+A PV has either a `link` or a `source`, not both. Waveforms are read-only.
+
+### The driver
+
+Any object with this interface (the one `pyioc init` generates in epik8s-pyioc):
+
+```python
+class Driver:
+    def connect(self) -> None: ...
+    def close(self) -> None: ...
+    def read(self, names: list[str]) -> dict: ...     # {name: value}; None or missing = not published
+    def write(self, name: str, value) -> None: ...
+    def command(self, name: str) -> None: ...
+```
+
+Enum and bool values are indexes (enum names are also accepted on read); waveforms are any sequence of numbers.
+
+The driver is created by `TaskBase.create_driver()`. The default uses `parameters.simulate` or `parameters.driver` + `driver_args`; override it to build the driver from other parameters.
+
+### Behaviour
+
+- **One driver thread.** All driver calls run in a dedicated thread, one at a time, so a slow or hung device never blocks the soft IOC dispatcher, CA/PVA clients or rule evaluation. Client writes and commands are served as they arrive, between reads.
+- **Reconnection.** A failed `connect()` is retried every `reconnect_period` (default `max(poll_period, 1)`). A failed `read()` means the device is lost: the driver is closed, `CONNECTED` goes to `Disconnected`, and connection is retried. A failed `write()` or `command()` is reported but keeps the connection.
+- **Errors.** Each failure is published on `MESSAGE`; its traceback is logged once per distinct error, not on every retry, and recovery is logged once.
+- **Before the first read**, rules and transforms see each PV's configured `value`. The first read after each (re)connection counts as a change in reactive mode.
+- **Writes while disconnected** are dropped and reported; a command PV still returns to `Idle`.
+

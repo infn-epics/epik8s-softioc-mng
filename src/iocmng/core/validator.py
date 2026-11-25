@@ -18,7 +18,7 @@ import yaml
 
 from iocmng.base.task import TaskBase
 from iocmng.base.job import JobBase
-from iocmng.core.plugin_spec import VALID_PV_TYPES
+from iocmng.core.plugin_spec import VALID_PV_TYPES, PvArgumentSpec
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,12 @@ class PluginValidator:
                     errors.append(
                         f"PV '{pv_name}' in {config_name}.{section_name} has invalid type '{pv_type}'"
                     )
+                    continue
+                # Field rules (source/access, enum choices, waveform length)
+                try:
+                    PvArgumentSpec.from_config(str(pv_name), section_name[:-1], pv_cfg)
+                except ValueError as exc:
+                    errors.append(f"{config_name}.{section_name}: {exc}")
 
     @staticmethod
     def validate_config_path(directory: Path) -> ValidationResult:

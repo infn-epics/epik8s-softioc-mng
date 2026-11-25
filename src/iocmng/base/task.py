@@ -8,6 +8,7 @@ abstract methods: initialize(), execute(), and cleanup().
 
 import ast
 import datetime
+import importlib
 import logging
 import threading
 import time
@@ -161,6 +162,21 @@ class TaskBase(ABC):
         self._control_request_lock = threading.Lock()
         self._pending_clear = False
         self._pending_reset = False
+        # ── Driver source ────────────────────────────────────────────
+        # PVs with ``source: driver`` are read from / written to a device
+        # driver by a DriverEngine thread (see iocmng.core.driver).
+        self.driver: Any = None
+        self._driver_engine = None
+        self._driver_specs = {
+            n: s for n, s in list(self.plugin_spec.inputs.items()) + list(self.plugin_spec.outputs.items())
+            if s.driven
+        }
+        self._last_driver_error: Optional[str] = None
+        # Readback values being published to setting records: their
+        # on_update echo must not be written back to the device.
+        self._driver_echo: Dict[str, Any] = {}
+        # True until the first read after each (re)connection.
+        self._driver_fresh = True
         self._init_buffers()
 
     def _get_pv_prefix(self, controller_prefix: Optional[str] = None) -> str:
@@ -231,16 +247,21 @@ class TaskBase(ABC):
             on_update=lambda v: self._on_control_update("RESET", v),
         )
 
-        reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION", "CLEAR", "RESET"}
-        for pv_name, pv_spec in self.plugin_spec.inputs.items():
+        reserved = {"STATUS", "MESSAGE", "ENABLE", "RUN", "CYCLE_COUNT", "VERSION", "CLEAR", "RESET", "CONNECTED"}
+        for pv_name, pv_spec in list(self.plugin_spec.inputs.items()) + list(self.plugin_spec.outputs.items()):
             if pv_name in reserved:
                 continue
-            self.pvs[pv_name] = create_softioc_record(pv_spec)
+            on_update = None
+            if pv_spec.driven and pv_spec.writable:
+                on_update = self._make_driver_put(pv_name, pv_spec)
+            self.pvs[pv_name] = create_softioc_record(pv_spec, on_update=on_update)
 
-        for pv_name, pv_spec in self.plugin_spec.outputs.items():
-            if pv_name in reserved:
-                continue
-            self.pvs[pv_name] = create_softioc_record(pv_spec)
+        # Device connection state, for tasks with driver PVs.
+        if self._driver_specs:
+            self.pvs["CONNECTED"] = builder.boolIn(
+                "CONNECTED", initial_value=0, ZNAM="Disconnected", ONAM="Connected",
+                ZSV="MAJOR",
+            )
 
         # ── Connection-status waveform PVs ───────────────────────────
         # One element per wired port: 1 = connected, 0 = disconnected.
@@ -292,6 +313,9 @@ class TaskBase(ABC):
 
         # Start link monitors for wired inputs with mode=monitor
         self._start_link_monitors()
+
+        # Start the device driver thread for PVs with source: driver
+        self._start_driver()
 
         if self.mode == "continuous":
             self._thread = threading.Thread(
@@ -358,6 +382,7 @@ class TaskBase(ABC):
         self.logger.info(f"Stopping task: {self.name}")
         self.running = False
         self._stop_link_monitors()
+        self._stop_driver()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=10)
         self.set_status("END")
@@ -646,6 +671,182 @@ class TaskBase(ABC):
             if key not in ctx:
                 ctx[key] = val
         return ctx
+
+    # ------------------------------------------------------------------
+    # Driver source — PVs read from and written to a device driver
+    # ------------------------------------------------------------------
+
+    def create_driver(self) -> Any:
+        """Return the device driver for PVs with ``source: driver``.
+
+        The default uses the task parameters:
+
+        * ``simulate: true`` — an in-memory :class:`SimulatedDriver`;
+        * ``driver: "package.module:Class"`` — ``Class(**driver_args)``.
+
+        Override it to build the driver from other parameters (host, port...).
+        """
+        from iocmng.core.driver import SimulatedDriver
+
+        if self.parameters.get("simulate"):
+            return SimulatedDriver(self._driver_specs)
+        target = self.parameters.get("driver")
+        if not target:
+            raise ValueError(
+                "PVs with source: driver need parameters.driver ('module:Class'), "
+                "simulate: true, or a create_driver() override"
+            )
+        module_name, _, class_name = str(target).partition(":")
+        if not class_name:
+            raise ValueError(f"parameters.driver must be 'module:Class', got {target!r}")
+        cls = getattr(importlib.import_module(module_name), class_name)
+        return cls(**dict(self.parameters.get("driver_args") or {}))
+
+    def _start_driver(self) -> None:
+        if not self._driver_specs or self._driver_engine is not None:
+            return
+        from iocmng.core.driver import DriverEngine
+
+        self.driver = self.create_driver()
+        names = [n for n, s in self._driver_specs.items() if s.access in ("ro", "rw")]
+        # Rules and transforms see the configured values until the first read.
+        for name in names:
+            spec = self._driver_specs[name]
+            if name not in self.link_values and spec.type != "waveform":
+                try:
+                    self.link_values[name] = self._driver_value(spec, spec.value)
+                except Exception:
+                    pass
+        period = float(self.parameters.get("poll_period", self.parameters.get("interval", 1.0)))
+        self._driver_engine = DriverEngine(
+            self.driver,
+            names,
+            period,
+            on_values=self._on_driver_values,
+            on_connection=self._on_driver_connection,
+            on_error=self._on_driver_error,
+            retry=self.parameters.get("reconnect_period"),
+            logger=self.logger,
+        )
+        self._driver_engine.start(self.name)
+
+    def _stop_driver(self) -> None:
+        if self._driver_engine is not None:
+            self._driver_engine.stop()
+            self._driver_engine = None
+
+    def _make_driver_put(self, name: str, spec):
+        """softioc on_update callback of a driver setting or command PV."""
+        if spec.access == "cmd":
+            def _cmd(value):
+                if self._driver_engine is None or int(value or 0) != 1:
+                    return
+                record = self.pvs.get(name)
+                # Back to Idle once done; the 0 it posts is ignored above.
+                self._driver_engine.submit_command(
+                    name, after=(lambda: record.set(0)) if record is not None else None
+                )
+            return _cmd
+
+        def _put(value):
+            # Ignore record processing before the driver runs (iocInit).
+            if self._driver_engine is None:
+                return
+            # A readback published by _on_driver_values comes back here:
+            # the device already has it.
+            if name in self._driver_echo and self._driver_echo[name] == value:
+                del self._driver_echo[name]
+                return
+            self._driver_engine.submit_write(name, value)
+        return _put
+
+    def _driver_value(self, spec, value: Any) -> Any:
+        """Convert a driver value to what the record holds."""
+        if spec.type == "waveform":
+            import numpy as np
+            # Always full length: Phoebus (CAJ) cannot decode shorter arrays.
+            array = np.full(spec.length, np.nan)
+            data = np.asarray(value, dtype=float).ravel()[: spec.length]
+            array[: data.size] = data
+            return array
+        if spec.type == "enum":
+            return spec.choices.index(value) if isinstance(value, str) else int(value)
+        if spec.type == "bool":
+            if isinstance(value, str):
+                return 1 if value in (spec.onam, "1", "On", "true", "True") else 0
+            return int(bool(value))
+        if spec.type == "string":
+            return str(value)[:39]
+        if spec.type == "int":
+            return int(value)
+        return float(value)
+
+    def _on_driver_values(self, values: Dict[str, Any]) -> None:
+        """Publish one driver read (called from the driver thread)."""
+        # The first read after a (re)connection always counts as a change.
+        changed, self._driver_fresh = self._driver_fresh, False
+        for name, raw in values.items():
+            spec = self._driver_specs.get(name)
+            if spec is None or raw is None:
+                continue
+            try:
+                value = self._driver_value(spec, raw)
+            except Exception as exc:
+                self._on_driver_error(ValueError(f"{name}: bad value {raw!r} ({exc})"), "conversion")
+                continue
+            old = self.link_values.get(name)
+            is_wave = spec.type == "waveform"
+            same = (old is not None and list(old) == list(value)) if is_wave else old == value
+            record = self.pvs.get(name)
+            if record is not None and (is_wave or not same):
+                try:
+                    if spec.writable:
+                        # Processed so monitors are posted (process=False posts
+                        # none); _put drops the echo instead of writing it back.
+                        self._driver_echo[name] = value
+                    record.set(value)
+                except Exception as exc:
+                    self.logger.debug("driver PV %s set failed: %s", name, exc)
+            self.link_values[name] = list(value) if is_wave else value
+            if not is_wave:
+                self._buffer_append(name, value)
+            if not same:
+                changed = True
+                if spec.trigger:
+                    try:
+                        self.on_input_changed(name, value, old)
+                    except Exception as exc:
+                        self.logger.error("on_input_changed(%s) error: %s", name, exc)
+        self._clear_driver_error()
+        if changed and self.mode == "reactive" and self.enabled:
+            self._evaluate_transforms()
+            self._evaluate_rules()
+
+    def _on_driver_connection(self, connected: bool) -> None:
+        if connected:
+            self._driver_fresh = True
+        record = self.pvs.get("CONNECTED")
+        if record is not None:
+            try:
+                record.set(1 if connected else 0)
+            except Exception:
+                pass
+        if connected:
+            self.set_message("Device connected")
+
+    def _on_driver_error(self, exc: Exception, context: str) -> None:
+        """Publish a driver error; log the traceback once per distinct error."""
+        message = f"{context}: {exc}" if context else str(exc)
+        self.set_message(message)
+        if message != self._last_driver_error:
+            self.logger.error("%s", message, exc_info=exc)
+            self._last_driver_error = message
+
+    def _clear_driver_error(self) -> None:
+        if self._last_driver_error is not None:
+            self.logger.info("device recovered after: %s", self._last_driver_error)
+            self._last_driver_error = None
+            self.set_message("Device connected")
 
     # ------------------------------------------------------------------
     # Wired inputs — link engine

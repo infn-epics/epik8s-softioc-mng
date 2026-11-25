@@ -25,8 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "pyyaml>=6.0",
-    "softioc",
-    "cothread",
+    "softioc>=4.0",
     "p4p",
     "pyepics",
 ]
@@ -40,6 +39,9 @@ server = [
 ophyd = [
     "ophyd",
     "infn_ophyd_hal",
+]
+cothread = [
+    "cothread",
 ]
 kubernetes = [
     "kubernetes",

@@ -230,6 +230,7 @@ Every task automatically gets:
 | `IOCMNG_LOG_LEVEL` | `info` | Logging level |
 | `IOCMNG_PVA` | `true` | Use PVA (`true`) or CA (`false`) |
 | `IOCMNG_DISABLE_OPHYD` | `true` | Skip ophyd initialization |
+| `IOCMNG_DISPATCHER` | `asyncio` | Soft IOC dispatcher: `asyncio` or `cothread` (`pip install 'iocmng[cothread]'`) |
 
 ## Project Structure
 

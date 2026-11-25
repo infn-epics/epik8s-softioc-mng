@@ -217,7 +217,7 @@ def run(self):
             caput("DEVICE:SHUTDOWN", 1)
             self.logger.warning("Interlock triggered!")
         
-        cothread.Sleep(1.0)
+        time.sleep(1.0)
 ```
 
 ## Accessing Beamline Configuration
@@ -275,7 +275,7 @@ cainfo SPARC:SPARC:MY_TASK:OUTPUT
 Create a task that controls motors through Ophyd:
 
 ```python
-import cothread
+import time
 from task_base import TaskBase
 
 class MyMotorTask(TaskBase):
@@ -301,7 +301,7 @@ class MyMotorTask(TaskBase):
                     self.motor1.move(target, wait=False)
                     self.set_pv('MOVE_CMD', 0)
             
-            cothread.Sleep(0.5)
+            time.sleep(0.5)
     
     def cleanup(self):
         # Stop motors on exit

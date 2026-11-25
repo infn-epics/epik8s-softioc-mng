@@ -326,7 +326,9 @@ class IocMngController:
             return True, "softIOC disabled"
 
         try:
-            from softioc import builder, softioc
+            from softioc import builder
+
+            from iocmng.core.softioc_runtime import ioc_init
         except ImportError:
             logger.info("softIOC not installed; skipping PV publication for plugin '%s'", info.name)
             return True, "softIOC unavailable"
@@ -345,9 +347,9 @@ class IocMngController:
             # initialize the IOC runtime.
             builder.LoadDatabase()
             if not self._softioc_initialized:
-                softioc.iocInit()
+                dispatcher = ioc_init()
                 self._softioc_initialized = True
-                logger.info("softIOC initialized in API mode")
+                logger.info("softIOC initialized in API mode (%s dispatcher)", dispatcher)
         except Exception as e:
             return False, f"softIOC initialization failed: {e}"
 

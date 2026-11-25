@@ -362,6 +362,35 @@ class TestTaskDriver:
         assert len([r for r in caplog.records if "connect failed" in r.getMessage()]) == 1
         assert "connect failed" in task.pvs["MESSAGE"].value
 
+    def test_hooks(self):
+        events = []
+        driver = FakeDriver({"Pressure": 1e-6})
+        driver.fail_connect = 1
+        task = self.make_task(driver, reconnect_period=0.01)
+        task.on_driver_connection = lambda connected: events.append(("connection", connected))
+        task.on_driver_error = lambda message: events.append(("error", message))
+        task.on_driver_recovered = lambda: events.append(("recovered",))
+        task._start_driver()
+        try:
+            assert wait_for(lambda: ("recovered",) in events)
+        finally:
+            task._stop_driver()
+        assert [e[0] for e in events[:3]] == ["error", "connection", "recovered"]
+        assert "connect failed" in events[0][1]
+        assert events[-1] == ("connection", False)
+
+    def test_failing_hook_is_logged(self, caplog):
+        task = self.make_task(FakeDriver())
+
+        def boom(connected):
+            raise RuntimeError("boom")
+        boom.__name__ = "on_driver_connection"
+        task.on_driver_connection = boom
+        with caplog.at_level("ERROR"):
+            task._on_driver_connection(True)
+        assert task.pvs["CONNECTED"].value == 1
+        assert any("on_driver_connection failed" in r.getMessage() for r in caplog.records)
+
 
 class TestCreateDriver:
 

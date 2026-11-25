@@ -1305,6 +1305,16 @@ Enum and bool values are indexes (enum names are also accepted on read); wavefor
 
 The driver is created by `TaskBase.create_driver()`. The default uses `parameters.simulate` or `parameters.driver` + `driver_args`; override it to build the driver from other parameters.
 
+Three hooks, called from the driver thread, let a subclass react to the device state (for example to publish extra status PVs):
+
+| Hook | Called |
+|------|--------|
+| `on_driver_connection(connected)` | when the device connects (`True`) or is lost (`False`) |
+| `on_driver_error(message)` | with the text of every driver error |
+| `on_driver_recovered()` | on the first successful read after an error |
+
+An exception raised by a hook is logged and does not stop the driver.
+
 ### Behaviour
 
 - **One driver thread.** All driver calls run in a dedicated thread, one at a time, so a slow or hung device never blocks the soft IOC dispatcher, CA/PVA clients or rule evaluation. Client writes and commands are served as they arrive, between reads.

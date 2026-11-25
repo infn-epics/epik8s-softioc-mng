@@ -848,6 +848,7 @@ class TaskBase(ABC):
                 pass
         if connected:
             self.set_message("Device connected")
+        self._call_hook(self.on_driver_connection, connected)
 
     def _on_driver_error(self, exc: Exception, context: str) -> None:
         """Publish a driver error; log the traceback once per distinct error."""
@@ -856,12 +857,31 @@ class TaskBase(ABC):
         if message != self._last_driver_error:
             self.logger.error("%s", message, exc_info=exc)
             self._last_driver_error = message
+        self._call_hook(self.on_driver_error, message)
 
     def _clear_driver_error(self) -> None:
         if self._last_driver_error is not None:
             self.logger.info("device recovered after: %s", self._last_driver_error)
             self._last_driver_error = None
             self.set_message("Device connected")
+            self._call_hook(self.on_driver_recovered)
+
+    def _call_hook(self, hook, *args) -> None:
+        try:
+            hook(*args)
+        except Exception as exc:
+            self.logger.error("%s failed: %s", hook.__name__, exc, exc_info=True)
+
+    # Hooks for subclasses: called from the driver thread.
+
+    def on_driver_connection(self, connected: bool) -> None:
+        """Called when the device connects (True) or is lost (False)."""
+
+    def on_driver_error(self, message: str) -> None:
+        """Called with the text of every driver error (also published on MESSAGE)."""
+
+    def on_driver_recovered(self) -> None:
+        """Called on the first successful read after an error."""
 
     # ------------------------------------------------------------------
     # Wired inputs — link engine

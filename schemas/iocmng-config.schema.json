@@ -26,6 +26,30 @@
           "minimum": 0,
           "default": 1.0,
           "description": "Seconds between execute() cycles (continuous mode)."
+        },
+        "simulate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Driver PVs: use the built-in in-memory simulator instead of a real driver."
+        },
+        "driver": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][\\w.]*:[A-Za-z_]\\w*$",
+          "description": "Driver PVs: 'package.module:Class', instantiated as Class(**driver_args)."
+        },
+        "driver_args": {
+          "type": "object",
+          "description": "Driver PVs: keyword arguments of the driver class (host, port, ...)."
+        },
+        "poll_period": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Driver PVs: seconds between driver reads. Defaults to interval."
+        },
+        "reconnect_period": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Driver PVs: seconds between reconnection attempts. Defaults to max(poll_period, 1)."
         }
       },
       "additionalProperties": {
@@ -110,18 +134,20 @@
     "pvDefinition": {
       "type": "object",
       "description": "Individual PV definition.",
-      "required": ["type", "value"],
+      "required": ["type"],
       "oneOf": [
         { "$ref": "#/$defs/pvFloat" },
         { "$ref": "#/$defs/pvInt" },
         { "$ref": "#/$defs/pvString" },
-        { "$ref": "#/$defs/pvBool" }
+        { "$ref": "#/$defs/pvBool" },
+        { "$ref": "#/$defs/pvEnum" },
+        { "$ref": "#/$defs/pvWaveform" }
       ]
     },
     "pvFloat": {
       "type": "object",
       "description": "Analog (float) PV — maps to softioc aOut (input) or aIn (output).",
-      "required": ["type", "value"],
+      "required": ["type"],
       "additionalProperties": false,
       "properties": {
         "type": { "const": "float" },
@@ -139,13 +165,15 @@
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
         "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
-        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" },
+        "source": { "$ref": "#/$defs/linkProperties/source" },
+        "access": { "$ref": "#/$defs/linkProperties/access" }
       }
     },
     "pvInt": {
       "type": "object",
       "description": "Integer PV — maps to softioc longOut (input) or longIn (output).",
-      "required": ["type", "value"],
+      "required": ["type"],
       "additionalProperties": false,
       "properties": {
         "type": { "const": "int" },
@@ -156,13 +184,15 @@
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
         "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
-        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" },
+        "source": { "$ref": "#/$defs/linkProperties/source" },
+        "access": { "$ref": "#/$defs/linkProperties/access" }
       }
     },
     "pvString": {
       "type": "object",
       "description": "String PV — maps to softioc stringOut (input) or stringIn (output).",
-      "required": ["type", "value"],
+      "required": ["type"],
       "additionalProperties": false,
       "properties": {
         "type": { "const": "string" },
@@ -171,13 +201,15 @@
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
         "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
-        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" },
+        "source": { "$ref": "#/$defs/linkProperties/source" },
+        "access": { "$ref": "#/$defs/linkProperties/access" }
       }
     },
     "pvBool": {
       "type": "object",
       "description": "Boolean PV — maps to softioc boolOut (input) or boolIn (output).",
-      "required": ["type", "value"],
+      "required": ["type"],
       "additionalProperties": false,
       "properties": {
         "type": { "const": "bool" },
@@ -200,7 +232,49 @@
         "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
         "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
         "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
-        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" }
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" },
+        "source": { "$ref": "#/$defs/linkProperties/source" },
+        "access": { "$ref": "#/$defs/linkProperties/access" }
+      }
+    },
+    "pvEnum": {
+      "type": "object",
+      "description": "Enumerated PV — maps to softioc mbbOut (writable) or mbbIn.",
+      "required": ["type", "choices"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "enum" },
+        "value": { "type": ["integer", "string"], "description": "Initial state: index or choice name." },
+        "choices": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 25 },
+          "minItems": 2,
+          "maxItems": 16,
+          "description": "State names, in index order."
+        },
+        "link": { "$ref": "#/$defs/linkProperties/link" },
+        "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
+        "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
+        "buffer_size": { "$ref": "#/$defs/linkProperties/buffer_size" },
+        "source": { "$ref": "#/$defs/linkProperties/source" },
+        "access": { "$ref": "#/$defs/linkProperties/access" }
+      }
+    },
+    "pvWaveform": {
+      "type": "object",
+      "description": "Array PV — maps to softioc WaveformIn, always published at full length (NaN padded).",
+      "required": ["type", "length"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "waveform" },
+        "value": { "description": "Ignored: a waveform starts as NaN." },
+        "length": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Number of elements." },
+        "link": { "$ref": "#/$defs/linkProperties/link" },
+        "link_mode": { "$ref": "#/$defs/linkProperties/link_mode" },
+        "poll_rate": { "$ref": "#/$defs/linkProperties/poll_rate" },
+        "trigger": { "$ref": "#/$defs/linkProperties/trigger" },
+        "source": { "$ref": "#/$defs/linkProperties/source" }
       }
     },
     "linkProperties": {
@@ -229,6 +303,17 @@
         "type": "integer",
         "minimum": 1,
         "description": "When set, keeps a ring buffer of the last N values. Accessible in expressions as <name>_buf."
+      },
+      "source": {
+        "type": "string",
+        "enum": ["driver"],
+        "description": "'driver' reads the PV from the task's device driver (driver.read) each cycle instead of an external PV. Needs parameters.driver, simulate: true, or a create_driver() override. Excludes link."
+      },
+      "access": {
+        "type": "string",
+        "enum": ["ro", "rw", "cmd"],
+        "default": "ro",
+        "description": "Driver PVs only. 'ro' a readback; 'rw' a setting written with driver.write and read back each cycle; 'cmd' a write-only bool action sent with driver.command, back to Idle when done."
       }
     },
     "ruleDefinition": {

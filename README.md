@@ -8,6 +8,7 @@ A pluggable task/job framework for EPICS soft IOC applications on Kubernetes. Pr
 - **`JobBase`** — base class for one-shot jobs returning structured results
 - **`DeclarativeTask`** — zero-code tasks driven entirely by `config.yaml` rules and transforms
 - **Wired inputs/outputs** — automatically read/write external PVs (poll or monitor)
+- **Driver source** — `source: driver` PVs read from and written to a device driver (`connect`/`read`/`write`/`command`) in its own thread, with reconnection, `CONNECTED` PV and a built-in simulator; enum and waveform PV types
 - **Connection tracking** — `CONN_INP` / `CONN_OUT` waveform PVs show live CA/PVA connection state per port
 - **Declarative rules** — safe boolean expressions that fire actuators and set outputs
 - **Rule tolerance** — `tolerance: <seconds>` fires a rule only after its condition has stayed true for that long, filtering short glitches (default `0`, immediate)
